@@ -1,0 +1,44 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+*.out.html
+
+# Dependency directories
+vendor/
+
+# Editor nonsense
+.vscode
+.idea
+*.iml
+*.swp
+.DS_Store
+
+build-output
+/tools/*
+!/tools/src/
+
+# Don't accidentally add files from `go build`
+telepresence
+traffic
+tst-manager
+tst-systema
+!/cmd/*/
+
+# The Chart directory
+!/charts/telepresence
+
+# Needed to build on windows
+.wintools
+.gocache
+
+# Don't accidentally add binaries built byintegration tests
+/integration_test/testdata/echo-server/echo-server

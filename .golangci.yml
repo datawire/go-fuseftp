@@ -1,0 +1,10 @@
+run:
+  modules-download-mode: readonly
+
+linters-settings:
+  gofmt:
+    simplify: true
+  goimports:
+    local-prefixes: github.com/datawire
+  nolintlint:
+    allow-leading-space: false
