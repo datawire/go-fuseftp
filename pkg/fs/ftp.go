@@ -377,11 +377,13 @@ func (f *fuseImpl) Rename(oldpath string, newpath string) int {
 		if err := conn.Rename(relpath(oldpath), relpath(newpath)); err != nil {
 			return err
 		}
+		f.Lock()
 		for _, fe := range f.current {
 			if fe.path == oldpath {
 				fe.path = newpath
 			}
 		}
+		f.Unlock()
 		return nil
 	}))
 }
@@ -488,9 +490,9 @@ func (f *fuseImpl) errToFuseErr(err error) int {
 	}
 	em := err.Error()
 	switch {
-	case strings.HasPrefix(em, ftp.StatusText(ftp.StatusCommandOK)+" "): // Closing transfer connection
+	case strings.HasPrefix(em, ftp.StatusText(ftp.StatusCommandOK)+" "):
 		return 0
-	case strings.HasPrefix(em, ftp.StatusText(ftp.StatusClosingDataConnection)+" "): // Closing transfer connection
+	case strings.HasPrefix(em, ftp.StatusText(ftp.StatusClosingDataConnection)+" "):
 		return -fuse.ECONNABORTED
 	case strings.Contains(em, "file does not exist"), strings.Contains(em, "no such file or directory"):
 		dlog.Errorf(f.ctx, "%T %v", err, err)
