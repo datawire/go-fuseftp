@@ -113,9 +113,13 @@ func (w *tbWrapper) UnformattedLogln(level dlog.LogLevel, args ...any) {
 	w.UnformattedLog(level, fmt.Sprintln(args...))
 }
 
+const remoteDir = "exported"
+
 // startFTPServer starts an FTP server and returns the directory that it exports and the port that it is listening to
 func startFTPServer(t *testing.T, ctx context.Context, wg *sync.WaitGroup) (string, uint16) {
 	root := t.TempDir()
+	export := filepath.Join(root, remoteDir)
+	require.NoError(t, os.Mkdir(export, 0755))
 	portCh := make(chan uint16)
 
 	wg.Add(1)
@@ -128,7 +132,7 @@ func startFTPServer(t *testing.T, ctx context.Context, wg *sync.WaitGroup) (stri
 	case <-ctx.Done():
 		return "", 0
 	case port := <-portCh:
-		return root, port
+		return export, port
 	}
 }
 
@@ -142,7 +146,8 @@ func TestConnectionFailure(t *testing.T) {
 	require.NotEqual(t, uint16(0), port)
 
 	// Start the client
-	fsh := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), time.Second)
+	fsh, err := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), remoteDir, time.Second)
+	require.NoError(t, err)
 
 	mountPoint := t.TempDir()
 	host := NewHost(fsh, mountPoint)
@@ -198,6 +203,21 @@ func TestConnectionFailure(t *testing.T) {
 		// Write a file to the mounted directory
 		require.True(t, broken(os.WriteFile(filepath.Join(mountPoint, "somefile.txt"), contents, 0644)))
 	})
+
+	t.Run("Restart", func(t *testing.T) {
+		// Start a new server
+		root, port = startFTPServer(t, ctx, &wg)
+		require.NotEqual(t, uint16(0), port)
+		require.NoError(t, os.WriteFile(filepath.Join(root, "test1.txt"), contents, 0644))
+
+		// Assign the new address to the FTP client (it should now quit all connections and reconnect)
+		require.NoError(t, fsh.SetAddress(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port))))
+
+		// Ensure that the connection is restored
+		test1Mounted, err = os.ReadFile(filepath.Join(mountPoint, "test1.txt"))
+		require.NoError(t, err, fmt.Sprintf("%s ReadFile: %v", time.Now().Format("15:04:05.0000"), err))
+		assert.True(t, bytes.Equal(contents, test1Mounted))
+	})
 }
 
 func TestConnectedToServer(t *testing.T) {
@@ -209,7 +229,8 @@ func TestConnectedToServer(t *testing.T) {
 	require.NotEqual(t, uint16(0), port)
 
 	// Start the client
-	fsh := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), time.Second)
+	fsh, err := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), remoteDir, time.Second)
+	require.NoError(t, err)
 
 	mountPoint := t.TempDir()
 	host := NewHost(fsh, mountPoint)

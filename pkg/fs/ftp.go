@@ -108,18 +108,39 @@ func (f *info) isStale(now time.Time) bool {
 	return f.rr == nil && f.writer == nil && now.Sub(f.Time) >= stalePeriod
 }
 
+type FTPClient interface {
+	fuse.FileSystemInterface
+
+	// SetAddress will quit open connections, change the address, and reconnect
+	// The method is intended to be used when a FUSE mount must survive a change of
+	// FTP server address.
+	SetAddress(ctx context.Context, addr netip.AddrPort) error
+}
+
 // NewFTPClient returns an implementation of the fuse.FileSystemInterface that is backed by
-// an FTP server connection tp the given address.
-func NewFTPClient(ctx context.Context, addr netip.AddrPort, readTimeout time.Duration) fuse.FileSystemInterface {
+// an FTP server connection tp the address. The dir parameter is the directory that the
+// FTP server changes to when connecting.
+func NewFTPClient(ctx context.Context, addr netip.AddrPort, dir string, readTimeout time.Duration) (FTPClient, error) {
 	f := &fuseImpl{
 		current: make(map[uint64]*info),
 		connPool: connPool{
-			addr:        addr,
+			dir:         dir,
 			readTimeout: readTimeout,
 		},
 	}
-	f.ctx, f.cancel = context.WithCancel(ctx)
-	return f
+
+	ctx, cancel := context.WithCancel(ctx)
+	if err := f.connPool.setAddr(ctx, addr); err != nil {
+		cancel()
+		return nil, err
+	}
+	f.ctx = ctx
+	f.cancel = cancel
+	return f, nil
+}
+
+func (f *fuseImpl) SetAddress(ctx context.Context, addr netip.AddrPort) error {
+	return f.connPool.setAddr(ctx, addr)
 }
 
 func (f *fuseImpl) cacheSize() int {
@@ -200,7 +221,7 @@ func (f *fuseImpl) Init() {
 func (f *fuseImpl) Mkdir(path string, mode uint32) int {
 	dlog.Debugf(f.ctx, "Mkdir(%s, %O)", path, mode)
 	err := f.connPool.withConn(f.ctx, func(conn *ftp.ServerConn) error {
-		return conn.MakeDir(path)
+		return conn.MakeDir(relpath(path))
 	})
 	if err != nil {
 		return f.errToFuseErr(err)
@@ -210,7 +231,7 @@ func (f *fuseImpl) Mkdir(path string, mode uint32) int {
 	f.Lock()
 	f.current[f.nextHandle] = &info{
 		Entry: &ftp.Entry{
-			Name: filepath.Base(path),
+			Name: filepath.Base(relpath(path)),
 			Type: ftp.EntryTypeFolder,
 			Time: time.Now(),
 		},
@@ -270,7 +291,7 @@ func (f *fuseImpl) Read(path string, buff []byte, ofst int64, fh uint64) int {
 
 	if fe.rr == nil {
 		// Obtain the ftp.Response. It acts as an io.Reader
-		rr, err := fe.conn.RetrFrom(path, of)
+		rr, err := fe.conn.RetrFrom(relpath(path), of)
 		if err != nil {
 			return f.errToFuseErr(err)
 		}
@@ -302,6 +323,10 @@ func (f *fuseImpl) Read(path string, buff []byte, ofst int64, fh uint64) int {
 	return bytesRead
 }
 
+func relpath(path string) string {
+	return strings.TrimPrefix(path, "/")
+}
+
 // Readdir will read the remote directory using an MLSD command and call the given fill function
 // for each entry that was found. The ofst parameter is ignored.
 func (f *fuseImpl) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofst int64) bool, ofst int64, fh uint64) int {
@@ -317,7 +342,7 @@ func (f *fuseImpl) Readdir(path string, fill func(name string, stat *fuse.Stat_t
 	if errCode < 0 {
 		return errCode
 	}
-	es, err := fe.conn.List(path)
+	es, err := fe.conn.List(relpath(path))
 	if err != nil {
 		return f.errToFuseErr(err)
 	}
@@ -349,7 +374,7 @@ func (f *fuseImpl) Releasedir(path string, fh uint64) int {
 func (f *fuseImpl) Rename(oldpath string, newpath string) int {
 	dlog.Debugf(f.ctx, "Rename(%s, %s)", oldpath, newpath)
 	return f.errToFuseErr(f.connPool.withConn(f.ctx, func(conn *ftp.ServerConn) error {
-		if err := conn.Rename(oldpath, newpath); err != nil {
+		if err := conn.Rename(relpath(oldpath), relpath(newpath)); err != nil {
 			return err
 		}
 		for _, fe := range f.current {
@@ -365,7 +390,7 @@ func (f *fuseImpl) Rename(oldpath string, newpath string) int {
 func (f *fuseImpl) Rmdir(path string) int {
 	dlog.Debugf(f.ctx, "Rmdir(%s)", path)
 	return f.errToFuseErr(f.connPool.withConn(f.ctx, func(conn *ftp.ServerConn) error {
-		if err := conn.RemoveDir(path); err != nil {
+		if err := conn.RemoveDir(relpath(path)); err != nil {
 			return err
 		}
 		f.clearPath(path)
@@ -392,7 +417,7 @@ func (f *fuseImpl) Truncate(path string, size int64, fh uint64) int {
 	if fe.Size <= sz {
 		return 0
 	}
-	if err := fe.conn.StorFrom(path, bytes.NewReader(nil), sz); err != nil {
+	if err := fe.conn.StorFrom(relpath(path), bytes.NewReader(nil), sz); err != nil {
 		return f.errToFuseErr(err)
 	}
 	return 0
@@ -402,7 +427,7 @@ func (f *fuseImpl) Truncate(path string, size int64, fh uint64) int {
 func (f *fuseImpl) Unlink(path string) int {
 	dlog.Debugf(f.ctx, "Unlink(%s)", path)
 	return f.errToFuseErr(f.connPool.withConn(f.ctx, func(conn *ftp.ServerConn) error {
-		if err := conn.Delete(path); err != nil {
+		if err := conn.Delete(relpath(path)); err != nil {
 			return err
 		}
 		f.clearPath(path)
@@ -425,7 +450,7 @@ func (f *fuseImpl) Write(path string, buff []byte, ofst int64, fh uint64) int {
 		fe.wg.Add(1)
 		go func() {
 			defer fe.wg.Done()
-			if err := fe.conn.StorFrom(path, fe.reader, of); err != nil {
+			if err := fe.conn.StorFrom(relpath(path), fe.reader, of); err != nil {
 				dlog.Errorf(f.ctx, "error storing: %v", err)
 			}
 		}()
@@ -514,8 +539,7 @@ func (f *fuseImpl) openHandle(path string) (nfe *info, errCode int) {
 		path: path,
 		fh:   f.nextHandle,
 	}
-
-	nfe.Entry, err = conn.GetEntry(path)
+	nfe.Entry, err = conn.GetEntry(relpath(path))
 	if err != nil {
 		return nil, f.errToFuseErr(err)
 	}
@@ -569,7 +593,8 @@ func (f *fuseImpl) openDedicatedHandle(path string, create, append bool) (nfe *i
 		conn: conn,
 	}
 
-	nfe.Entry, err = conn.GetEntry(path)
+	rPath := relpath(path)
+	nfe.Entry, err = conn.GetEntry(rPath)
 	if err != nil {
 		errCode = f.errToFuseErr(err)
 		if !(create && errCode == -fuse.ENOENT) {
@@ -577,12 +602,12 @@ func (f *fuseImpl) openDedicatedHandle(path string, create, append bool) (nfe *i
 		}
 
 		// Create an empty file to ensure that it can be created
-		dlog.Debugf(f.ctx, "conn.Stor(%s)", path)
-		if err = conn.Stor(path, bytes.NewReader(nil)); err != nil {
+		dlog.Debugf(f.ctx, "conn.Stor(%s)", rPath)
+		if err = conn.Stor(rPath, bytes.NewReader(nil)); err != nil {
 			return nil, f.errToFuseErr(err)
 		}
 		nfe.Entry = &ftp.Entry{
-			Name: filepath.Base(path),
+			Name: filepath.Base(rPath),
 			Type: ftp.EntryTypeFile,
 			Time: time.Now(),
 		}

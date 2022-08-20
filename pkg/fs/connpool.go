@@ -16,13 +16,30 @@ type connList struct {
 	next *connList
 }
 
+// quit calls the Quit method on all connections and empties the pool
+func (cl *connList) quit(ctx context.Context, silent bool) {
+	for c := cl; c != nil; c = c.next {
+		if err := c.conn.Quit(); err != nil && !silent {
+			dlog.Errorf(ctx, "quit failed: %v", err)
+		}
+	}
+}
+
+func (cl *connList) size() int {
+	sz := 0
+	for n := cl; n != nil; n = n.next {
+		sz++
+	}
+	return sz
+}
+
 type connPool struct {
 	sync.Mutex
 	addr        netip.AddrPort
+	dir         string
 	readTimeout time.Duration
-	idleConns   *connList
-	openConns   int32
-	pooledConns int32
+	idleList    *connList
+	busyList    *connList
 }
 
 // connect returns a new connection without using the pool. Use get instead of connect.
@@ -40,62 +57,110 @@ func (p *connPool) connect(ctx context.Context) (*ftp.ServerConn, error) {
 	if err = conn.Login("anonymous", "anonymous"); err != nil {
 		return nil, err
 	}
+	if p.dir != "" {
+		if err = conn.ChangeDir(p.dir); err != nil {
+			return nil, err
+		}
+	}
+	// and add first in busyList
+	cl := &connList{
+		conn: conn,
+		next: p.busyList,
+	}
+	p.busyList = cl
 	return conn, nil
 }
 
 // get returns a connection from the pool, or creates a new connection if needed
 func (p *connPool) get(ctx context.Context) (conn *ftp.ServerConn, err error) {
 	p.Lock()
-	if idle := p.idleConns; idle != nil {
-		p.idleConns = idle.next
-		idle.next = nil
+	if idle := p.idleList; idle != nil {
+		p.idleList = idle.next
+		idle.next = p.busyList
+		p.busyList = idle
 		conn = idle.conn
-		p.pooledConns--
-	}
-	if conn == nil {
-		// Assume connect succeeds and increase while holding the lock
-		p.openConns++
 	}
 	p.logSz(ctx, "get")
 	p.Unlock()
 	if conn == nil {
-		if conn, err = p.connect(ctx); err != nil {
-			p.Lock()
-			p.openConns--
-			p.Unlock()
-		}
+		conn, err = p.connect(ctx)
 	}
 	return
 }
 
 func (p *connPool) logSz(ctx context.Context, pfx string) {
-	dlog.Debugf(ctx, "%s: pooled %d, open %d", pfx, p.pooledConns, p.openConns)
+	iz := p.idleList.size()
+	dlog.Debugf(ctx, "%s: pooled %d, open %d", pfx, iz, iz+p.busyList.size())
+}
+
+// setAddr will call Quit on all open connections, both busy and idle, change
+// the address, reconnect one connection, and put it in the idle list.
+func (p *connPool) setAddr(ctx context.Context, addr netip.AddrPort) error {
+	p.Lock()
+	if p.addr == addr {
+		p.Unlock()
+		return nil
+	}
+	p.doQuit(ctx, true) // attempt to clear current connections, but ignore errors
+	p.addr = addr
+	p.Unlock()
+
+	// Create the first connection up front, so that a failure to connect to the server is caught early
+	conn, err := p.connect(ctx)
+	if err != nil {
+		return err
+	}
+	p.put(ctx, conn)
+	return nil
 }
 
 // put returns a connection to the pool
 func (p *connPool) put(ctx context.Context, conn *ftp.ServerConn) {
 	p.Lock()
-	cl := &connList{
-		conn: conn,
-		next: p.idleConns,
+	// remove from busyList
+	removed := false
+	var prev *connList
+	for c := p.busyList; c != nil; c = c.next {
+		if c.conn == conn {
+			if prev == nil {
+				p.busyList = c.next
+			} else {
+				prev.next = c.next
+			}
+			removed = true
+			break
+		}
+		prev = c
 	}
-	p.idleConns = cl
-	p.pooledConns++
-	p.logSz(ctx, "put")
+
+	// we only add to the idleList if it was removed from the busyList because a call
+	// to quit() might call Quit() a busy conn, which may result in a subsequent attempt
+	// to return it to the pool.
+	if removed {
+		// and add first in idleList
+		cl := &connList{
+			conn: conn,
+			next: p.idleList,
+		}
+		p.idleList = cl
+		p.logSz(ctx, "put")
+	}
 	p.Unlock()
+}
+
+// quit calls the Quit method on all connections and empties the pool
+func (p *connPool) doQuit(ctx context.Context, silent bool) {
+	p.idleList.quit(ctx, silent)
+	p.busyList.quit(ctx, silent)
+	p.idleList = nil
+	p.busyList = nil
 }
 
 // quit calls the Quit method on all connections and empties the pool
 func (p *connPool) quit(ctx context.Context) {
 	p.Lock()
 	defer p.Unlock()
-	for idle := p.idleConns; idle != nil; idle = idle.next {
-		if err := idle.conn.Quit(); err != nil {
-			dlog.Errorf(ctx, "quit failed: %v", err)
-		}
-	}
-	p.idleConns = nil
-	p.openConns = 0
+	p.doQuit(ctx, false)
 }
 
 // tidy will attempt to shrink the number of open connections to two, but since it
@@ -104,19 +169,15 @@ func (p *connPool) quit(ctx context.Context) {
 func (p *connPool) tidy(ctx context.Context) {
 	p.Lock()
 	defer p.Unlock()
-	if p.openConns <= 2 {
-		return
-	}
-	for idle := p.idleConns; idle != nil; idle = idle.next {
-		p.idleConns = idle.next
+	iz := p.idleList.size()
+	bz := p.busyList.size()
+	sz := iz + bz
+	for idle := p.idleList; idle != nil && sz > 2; idle = idle.next {
+		p.idleList = idle.next
 		if err := idle.conn.Quit(); err != nil {
 			dlog.Errorf(ctx, "quit failed: %v", err)
 		}
-		p.pooledConns--
-		p.openConns--
-		if p.openConns <= 2 {
-			break
-		}
+		sz--
 	}
 }
 
