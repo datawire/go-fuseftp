@@ -488,6 +488,10 @@ func (f *fuseImpl) errToFuseErr(err error) int {
 	}
 	em := err.Error()
 	switch {
+	case strings.HasPrefix(em, ftp.StatusText(ftp.StatusCommandOK)+" "): // Closing transfer connection
+		return 0
+	case strings.HasPrefix(em, ftp.StatusText(ftp.StatusClosingDataConnection)+" "): // Closing transfer connection
+		return -fuse.ECONNABORTED
 	case strings.Contains(em, "file does not exist"), strings.Contains(em, "no such file or directory"):
 		dlog.Errorf(f.ctx, "%T %v", err, err)
 		return -fuse.ENOENT
@@ -497,6 +501,8 @@ func (f *fuseImpl) errToFuseErr(err error) int {
 		return -fuse.EPIPE
 	case strings.Contains(em, "EOF"):
 		return -fuse.EIO
+	case strings.Contains(em, "connection refused"):
+		return -fuse.ECONNREFUSED
 	default:
 		// TODO
 		buf := make([]byte, 0x10000)

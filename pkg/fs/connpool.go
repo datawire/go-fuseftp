@@ -164,7 +164,7 @@ func (p *connPool) quit(ctx context.Context) {
 }
 
 // tidy will attempt to shrink the number of open connections to two, but since it
-// only closes connections that have been returned at the time the call is made, there
+// only closes connections that are idle at the time the call is made, there
 // might still be more than 2 connections after the call returns.
 func (p *connPool) tidy(ctx context.Context) {
 	p.Lock()
@@ -178,6 +178,19 @@ func (p *connPool) tidy(ctx context.Context) {
 			dlog.Errorf(ctx, "quit failed: %v", err)
 		}
 		sz--
+	}
+	var prev *connList
+	for idle := p.idleList; idle != nil; idle = idle.next {
+		if err := idle.conn.NoOp(); err != nil {
+			if prev == nil {
+				p.idleList = idle.next
+			} else {
+				prev.next = idle.next
+			}
+			dlog.Errorf(ctx, "NoOp failed, dropping connection to %s: %v", p.addr, err)
+			_ = idle.conn.Quit()
+		}
+		prev = idle
 	}
 }
 

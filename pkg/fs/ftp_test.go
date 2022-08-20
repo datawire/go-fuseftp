@@ -68,6 +68,10 @@ func (w *tbWrapper) Log(level dlog.LogLevel, msg string) {
 	w.UnformattedLog(level, msg)
 }
 
+func (w *tbWrapper) MaxLevel() dlog.LogLevel {
+	return w.level
+}
+
 func (w *tbWrapper) UnformattedLog(level dlog.LogLevel, args ...any) {
 	if level > w.level {
 		return
@@ -138,7 +142,7 @@ func startFTPServer(t *testing.T, ctx context.Context, wg *sync.WaitGroup) (stri
 
 func TestConnectionFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	ctx = dlog.WithLogger(ctx, NewTestLogger(t, dlog.LogLevelDebug))
+	ctx = dlog.WithLogger(ctx, NewTestLogger(t, dlog.LogLevelInfo))
 
 	wg := sync.WaitGroup{}
 	serverCtx, serverCancel := context.WithCancel(ctx)
@@ -174,7 +178,7 @@ func TestConnectionFailure(t *testing.T) {
 		pe := &fs2.PathError{}
 		if errors.As(err, &pe) {
 			ee := pe.Error()
-			return strings.Contains(ee, "input/output error") || strings.Contains(ee, "broken pipe")
+			return strings.Contains(ee, "input/output error") || strings.Contains(ee, "broken pipe") || strings.Contains(ee, "connection refused")
 		}
 		return false
 	}
