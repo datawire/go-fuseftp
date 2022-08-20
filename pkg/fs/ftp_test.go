@@ -140,7 +140,13 @@ func startFTPServer(t *testing.T, ctx context.Context, wg *sync.WaitGroup) (stri
 	}
 }
 
-func TestConnectionFailure(t *testing.T) {
+func TestConnectFailure(t *testing.T) {
+	ctx := dlog.WithLogger(context.Background(), NewTestLogger(t, dlog.LogLevelInfo))
+	_, err := NewFTPClient(ctx, netip.MustParseAddrPort("198.51.100.32:21"), "", time.Second)
+	require.Error(t, err)
+}
+
+func TestBrokenConnection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = dlog.WithLogger(ctx, NewTestLogger(t, dlog.LogLevelInfo))
 
