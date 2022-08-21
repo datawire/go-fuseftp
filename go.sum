@@ -57,8 +57,8 @@ github.com/envoyproxy/go-control-plane v0.9.4/go.mod h1:6rpuAdCZL397s3pYoYcLgu1m
 github.com/envoyproxy/go-control-plane v0.9.7/go.mod h1:cwu0lG7PUMfa9snN8LXBig5ynNVH9qI8YYLbd1fK2po=
 github.com/envoyproxy/go-control-plane v0.9.9-0.20201210154907-fd9021fe5dad/go.mod h1:cXg6YxExXjJnVBQHBLXeUAgxn2UodCpnH306RInaBQk=
 github.com/envoyproxy/protoc-gen-validate v0.1.0/go.mod h1:iSmxcyjqTsJpI2R4NaDN7+kN2VEUnK/pcBlmesArF7c=
-github.com/fclairamb/ftpserverlib v0.19.0 h1:5QcSQ0OIJBlezIqmGehiL/AVsRb6dIkMxbkuhyPkESM=
-github.com/fclairamb/ftpserverlib v0.19.0/go.mod h1:pmukdVOFKKUY9zjWRoxFW8JAljyulC/uK5FfusJzK2E=
+github.com/fclairamb/ftpserverlib v0.19.1 h1:OIqW+AdcsUEq4apudrluDD1c4iCRidLAoQzJRBUJnbg=
+github.com/fclairamb/ftpserverlib v0.19.1/go.mod h1:cVeFR3wvEjgtK99686UXJaTvqZk8jbjHFnhaC23LGpc=
 github.com/fclairamb/go-log v0.4.1 h1:rLtdSG9x2pK41AIAnE8WYpl05xBJfw1ZyYxZaXFcBsM=
 github.com/fclairamb/go-log v0.4.1/go.mod h1:sw1KvnkZ4wKCYkvy4SL3qVZcJSWFP8Ure4pM3z+KNn4=
 github.com/go-gl/glfw v0.0.0-20190409004039-e6da0acd62b1/go.mod h1:vR7hzQXu2zJy9AVAgeJqvqgH9Q5CA+iKCZ2gyEVpxRU=
