@@ -34,6 +34,8 @@ func (fh *FuseHost) Start(ctx context.Context) {
 		"-o", "default_permissions",
 		"-o", "auto_cache",
 		"-o", "sync_read",
+		"-o", "uid=-1",
+		"-o", "gid=-1",
 	}
 	if dlog.MaxLogLevel(ctx) >= dlog.LogLevelDebug {
 		opts = append(opts, "-o", "debug")
