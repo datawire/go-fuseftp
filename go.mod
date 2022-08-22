@@ -6,7 +6,7 @@ require (
 	github.com/datawire/dlib v1.3.1-0.20220715022530-b09ab2e017e1
 	github.com/fclairamb/ftpserverlib v0.19.1
 	github.com/fclairamb/go-log v0.4.1
-	github.com/jlaffaye/ftp v0.0.0-20220818164422-4d1d644cf19d
+	github.com/jlaffaye/ftp v0.0.0-20220821212529-0aeb8660a7e2
 	github.com/spf13/afero v1.9.2
 	github.com/stretchr/testify v1.8.0
 	github.com/winfsp/cgofuse v1.5.0
@@ -23,6 +23,3 @@ require (
 	golang.org/x/text v0.3.7 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-// The Get/MLST command is currently in PR https://github.com/jlaffaye/ftp/pull/269
-replace github.com/jlaffaye/ftp v0.0.0-20220818164422-4d1d644cf19d => github.com/thallgren/ftp v0.0.0-20220819061632-13fe07fc1b57
