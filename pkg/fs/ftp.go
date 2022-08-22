@@ -501,6 +501,7 @@ func (f *fuseImpl) errToFuseErr(err error) int {
 	if err == nil {
 		return 0
 	}
+
 	em := err.Error()
 	switch {
 	case strings.HasPrefix(em, ftp.StatusText(ftp.StatusCommandOK)+" "):
@@ -537,17 +538,13 @@ func (f *fuseImpl) loadHandle(fh uint64) (*info, int) {
 	return fe, 0
 }
 
-func (f *fuseImpl) openHandle(path string) (nfe *info, errCode int) {
+func (f *fuseImpl) openHandle(path string) (*info, int) {
 	f.Lock()
+	defer f.Unlock()
 	for _, fe := range f.current {
 		if fe.path == path && fe.conn == nil {
-			nfe = fe
-			break
+			return fe, 0
 		}
-	}
-	f.Unlock()
-	if nfe != nil {
-		return nfe, 0
 	}
 
 	conn, err := f.connPool.get(f.ctx)
@@ -556,18 +553,17 @@ func (f *fuseImpl) openHandle(path string) (nfe *info, errCode int) {
 	}
 	defer f.connPool.put(f.ctx, conn)
 
-	nfe = &info{
+	nfe := &info{
 		path: path,
 		fh:   f.nextHandle,
 	}
 	nfe.Entry, err = conn.GetEntry(relpath(path))
 	if err != nil {
+		dlog.Debugf(f.ctx, "GetEntry: %v", err)
 		return nil, f.errToFuseErr(err)
 	}
-	f.Lock()
 	f.current[f.nextHandle] = nfe
 	f.nextHandle++
-	f.Unlock()
 	return nfe, 0
 }
 
