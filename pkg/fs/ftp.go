@@ -67,6 +67,10 @@ type info struct {
 	// this handle
 	conn *ftp.ServerConn
 
+	// writerConn is connection dedicated to the Write function, motivated by the fact that
+	// there might be simultaneous Read and Write operations on the same file handle.
+	writerConn *ftp.ServerConn
+
 	// rr and of is used when reading data from a remote file
 	rr *ftp.Response
 	of uint64
@@ -93,6 +97,8 @@ func (f *info) close(ctx context.Context, p *connPool) {
 		f.writer.Close()
 		f.writer = nil
 		f.reader = nil
+		p.put(ctx, f.writerConn)
+		f.writerConn = nil
 		f.wg.Wait()
 	}
 	if f.conn != nil {
@@ -450,9 +456,16 @@ func (f *fuseImpl) Write(path string, buff []byte, ofst int64, fh uint64) int {
 	if fe.reader == nil {
 		fe.reader, fe.writer = io.Pipe()
 		fe.wg.Add(1)
+		if conn := fe.writerConn; conn == nil {
+			var err error
+			if conn, err = f.connPool.get(f.ctx); err != nil {
+				return f.errToFuseErr(err)
+			}
+			fe.writerConn = conn
+		}
 		go func() {
 			defer fe.wg.Done()
-			if err := fe.conn.StorFrom(relpath(path), fe.reader, of); err != nil {
+			if err := fe.writerConn.StorFrom(relpath(path), fe.reader, of); err != nil {
 				dlog.Errorf(f.ctx, "error storing: %v", err)
 			}
 		}()
