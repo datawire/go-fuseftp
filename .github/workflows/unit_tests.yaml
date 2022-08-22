@@ -45,3 +45,31 @@ jobs:
 # See https://github.com/osxfuse/osxfuse/issues/879#issuecomment-1114140186 for more info
 #      - name: Run tests
 #        run: make test
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Download winfsp
+        shell: bash
+        run: |
+          curl -L -o winfsp.msi https://github.com/winfsp/winfsp/releases/download/v1.11/winfsp-1.11.22176.msi
+      - name: Install winfsp
+        shell: powershell
+        run: |
+          Start-Process msiexec -Wait -verb runAs -Args "/i winfsp.msi /passive /qn /L*V winfsp-install.log"
+          [Environment]::SetEnvironmentVariable("Path", "C:\\;C:\\Program Files (x86)\\WinFsp\\inc\\fuse;$ENV:Path", "Machine")
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v3
+        with:
+          go-version: 1.18
+      - uses: egor-tensin/setup-mingw@v2
+        with:
+          platform: x64
+          cygwin: 0
+      - name: Run lint
+        uses: golangci/golangci-lint-action@v3
+      - name: Install make
+        shell: bash
+        run: choco install make
+      - name: Run tests
+        shell: bash
+        run: make test
