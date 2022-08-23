@@ -689,6 +689,8 @@ func toStat(e *ftp.Entry, s *fuse.Stat_t) {
 	s.Ctim = tm
 	s.Mtim = tm
 	s.Birthtim = s.Ctim
+	s.Uid = uint32(os.Getuid())
+	s.Gid = uint32(os.Getgid())
 	s.Nlink = 1
 	s.Flags = 0
 }
