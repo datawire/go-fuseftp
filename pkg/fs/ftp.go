@@ -593,53 +593,40 @@ func (f *fuseImpl) openDedicatedHandle(path string, create, append bool) (nfe *i
 		}
 	}()
 
+	var e *ftp.Entry
 	for _, fe := range f.current {
 		if fe.path == path {
-			if fe.conn == nil {
-				nfe = fe
-			} else {
-				nfe = &info{
-					path:  path,
-					fh:    f.nextHandle,
-					Entry: fe.Entry,
-				}
-				f.current[f.nextHandle] = nfe
-				f.nextHandle++
-			}
-			nfe.conn = conn
-			if append {
-				nfe.of = nfe.Size
-			}
+			e = fe.Entry
 			break
 		}
 	}
-	if nfe != nil {
-		return nfe, 0
+
+	if e == nil {
+		rPath := relpath(path)
+		e, err = conn.GetEntry(rPath)
+		if err != nil {
+			errCode = f.errToFuseErr(err)
+			if !(create && errCode == -fuse.ENOENT) {
+				return nil, errCode
+			}
+
+			// Create an empty file to ensure that it can be created
+			if err = conn.Stor(rPath, bytes.NewReader(nil)); err != nil {
+				return nil, f.errToFuseErr(err)
+			}
+			e = &ftp.Entry{
+				Name: filepath.Base(rPath),
+				Type: ftp.EntryTypeFile,
+				Time: time.Now(),
+			}
+		}
 	}
 
 	nfe = &info{
-		path: path,
-		fh:   f.nextHandle,
-		conn: conn,
-	}
-
-	rPath := relpath(path)
-	nfe.Entry, err = conn.GetEntry(rPath)
-	if err != nil {
-		errCode = f.errToFuseErr(err)
-		if !(create && errCode == -fuse.ENOENT) {
-			return nil, errCode
-		}
-
-		// Create an empty file to ensure that it can be created
-		if err = conn.Stor(rPath, bytes.NewReader(nil)); err != nil {
-			return nil, f.errToFuseErr(err)
-		}
-		nfe.Entry = &ftp.Entry{
-			Name: filepath.Base(rPath),
-			Type: ftp.EntryTypeFile,
-			Time: time.Now(),
-		}
+		Entry: e,
+		path:  path,
+		fh:    f.nextHandle,
+		conn:  conn,
 	}
 	if append {
 		nfe.of = nfe.Size

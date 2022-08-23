@@ -77,10 +77,10 @@ func (p *connPool) get(ctx context.Context) (conn *ftp.ServerConn, err error) {
 		p.busyList = idle
 		conn = idle.conn
 	}
-	p.logSz(ctx, "get")
 	if conn == nil {
 		conn, err = p.connect(ctx)
 	}
+	p.logSz(ctx, "get")
 	return
 }
 
