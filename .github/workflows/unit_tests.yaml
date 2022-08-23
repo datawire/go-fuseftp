@@ -67,9 +67,6 @@ jobs:
           cygwin: 0
       - name: Run lint
         uses: golangci/golangci-lint-action@v3
-      - name: Install make
-        shell: bash
-        run: choco install make
       - name: Run tests
         shell: bash
-        run: make test
+        run: CGO_ENABLED=0 go test ./...

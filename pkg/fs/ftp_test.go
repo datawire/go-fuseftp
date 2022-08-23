@@ -118,6 +118,10 @@ func (w *tbWrapper) UnformattedLogln(level dlog.LogLevel, args ...any) {
 	w.UnformattedLog(level, fmt.Sprintln(args...))
 }
 
+func testContext(t *testing.T) context.Context {
+	return dlog.WithLogger(context.Background(), NewTestLogger(t, dlog.LogLevelDebug))
+}
+
 const remoteDir = "exported"
 
 // startFTPServer starts an FTP server and returns the directory that it exports and the port that it is listening to
@@ -158,14 +162,13 @@ func startFUSEHost(t *testing.T, ctx context.Context, port uint16, dir string) (
 }
 
 func TestConnectFailure(t *testing.T) {
-	ctx := dlog.WithLogger(context.Background(), NewTestLogger(t, dlog.LogLevelInfo))
+	ctx := testContext(t)
 	_, err := NewFTPClient(ctx, netip.MustParseAddrPort("198.51.100.32:21"), "", time.Second)
 	require.Error(t, err)
 }
 
 func TestBrokenConnection(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	ctx = dlog.WithLogger(ctx, NewTestLogger(t, dlog.LogLevelDebug))
+	ctx, cancel := context.WithCancel(testContext(t))
 
 	wg := sync.WaitGroup{}
 	serverCtx, serverCancel := context.WithCancel(ctx)
@@ -243,8 +246,7 @@ func TestBrokenConnection(t *testing.T) {
 }
 
 func TestConnectedToServer(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	ctx = dlog.WithLogger(ctx, NewTestLogger(t, dlog.LogLevelInfo))
+	ctx, cancel := context.WithCancel(testContext(t))
 
 	wg := sync.WaitGroup{}
 	tmp := t.TempDir()
