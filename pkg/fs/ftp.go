@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"net/netip"
 	"os"
@@ -506,19 +507,22 @@ func (f *fuseImpl) errToFuseErr(err error) int {
 	switch {
 	case strings.HasPrefix(em, ftp.StatusText(ftp.StatusCommandOK)+" "):
 		return 0
-	case strings.HasPrefix(em, ftp.StatusText(ftp.StatusClosingDataConnection)+" "):
+	case strings.HasPrefix(em, ftp.StatusText(ftp.StatusClosingDataConnection)+" "), strings.Contains(em, errConnAborted):
 		return -fuse.ECONNABORTED
-	case strings.Contains(em, "file does not exist"), strings.Contains(em, "no such file or directory"):
-		dlog.Errorf(f.ctx, "%T %v", err, err)
+	case containsAny(em, fs.ErrNotExist.Error(), errFileNotFound, errDirNotFound):
 		return -fuse.ENOENT
-	case strings.Contains(em, "directory not empty"):
+	case strings.Contains(em, errDirNotEmpty):
 		return -fuse.ENOTEMPTY
-	case strings.Contains(em, "broken pipe"):
+	case strings.Contains(em, errBrokenPipe):
 		return -fuse.EPIPE
-	case strings.Contains(em, "EOF"):
+	case strings.Contains(em, io.EOF.Error()):
 		return -fuse.EIO
-	case strings.Contains(em, "connection refused"):
+	case strings.Contains(em, errConnRefused):
 		return -fuse.ECONNREFUSED
+	case strings.Contains(em, errIOTimeout):
+		return -fuse.ETIMEDOUT
+	case strings.Contains(em, errFileExists):
+		return -fuse.EEXIST
 	default:
 		// TODO
 		buf := make([]byte, 0x10000)
@@ -658,4 +662,13 @@ func toStat(e *ftp.Entry, s *fuse.Stat_t) {
 	s.Birthtim = s.Ctim
 	s.Nlink = 1
 	s.Flags = 0
+}
+
+func containsAny(str string, ss ...string) bool {
+	for _, s := range ss {
+		if strings.Contains(str, s) {
+			return true
+		}
+	}
+	return false
 }

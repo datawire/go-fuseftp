@@ -184,7 +184,7 @@ func TestBrokenConnection(t *testing.T) {
 		pe := &fs2.PathError{}
 		if errors.As(err, &pe) {
 			ee := pe.Error()
-			return strings.Contains(ee, "input/output error") || strings.Contains(ee, "broken pipe") || strings.Contains(ee, "connection refused")
+			return containsAny(ee, errIO, errBrokenPipe, errConnRefused, errUnexpectedNetworkError)
 		}
 		return false
 	}
@@ -320,14 +320,14 @@ func TestConnectedToServer(t *testing.T) {
 		_, err := os.Create(filepath.Join(mountPoint, "a", "b"))
 		isDir := &fs2.PathError{}
 		require.ErrorAs(t, err, &isDir)
-		require.Contains(t, isDir.Error(), "is a directory")
+		require.Contains(t, isDir.Error(), errIsDirectory)
 	})
 
 	t.Run("Create no-such-dir", func(t *testing.T) {
 		_, err := os.Create(filepath.Join(mountPoint, "b", "test3.txt"))
 		noSuchDir := &fs2.PathError{}
 		require.ErrorAs(t, err, &noSuchDir)
-		require.Contains(t, noSuchDir.Error(), "no such file or directory")
+		require.Contains(t, noSuchDir.Error(), errDirNotFound)
 	})
 
 	t.Run("Rename", func(t *testing.T) {
@@ -398,7 +398,7 @@ func TestConnectedToServer(t *testing.T) {
 		_, err = df.ReadDir(0)
 		notADir := &fs2.PathError{}
 		require.ErrorAs(t, err, &notADir)
-		require.Contains(t, notADir.Error(), "not a directory")
+		require.Contains(t, notADir.Error(), errNotDirectory)
 	})
 
 	t.Run("Truncate", func(t *testing.T) {
@@ -433,14 +433,14 @@ func TestConnectedToServer(t *testing.T) {
 		err := os.Remove(filepath.Join(mountPoint, "a", "b"))
 		notEmpty := &fs2.PathError{}
 		require.ErrorAs(t, err, &notEmpty)
-		require.Contains(t, notEmpty.Error(), "directory not empty")
+		require.Contains(t, notEmpty.Error(), errDirNotEmpty)
 	})
 
 	t.Run("Remove non-existent", func(t *testing.T) {
 		err := os.Remove(filepath.Join(mountPoint, "a", "nodir"))
-		notEmpty := &fs2.PathError{}
-		require.ErrorAs(t, err, &notEmpty)
-		require.Contains(t, notEmpty.Error(), "no such file or directory")
+		notFound := &fs2.PathError{}
+		require.ErrorAs(t, err, &notFound)
+		require.Contains(t, notFound.Error(), errFileNotFound)
 	})
 
 	t.Run("RemoveAll", func(t *testing.T) {
@@ -457,6 +457,6 @@ func TestConnectedToServer(t *testing.T) {
 		err := os.Mkdir(filepath.Join(mountPoint, "a", "test3.txt"), 0755)
 		isFile := &fs2.PathError{}
 		require.ErrorAs(t, err, &isFile)
-		require.Contains(t, isFile.Error(), "file exists")
+		require.Contains(t, isFile.Error(), errFileExists)
 	})
 }
