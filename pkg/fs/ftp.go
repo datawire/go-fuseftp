@@ -27,8 +27,10 @@ import (
 type fuseImpl struct {
 	*fuse.FileSystemBase
 
-	// All exported functions are protected by this mutex.
 	sync.Mutex
+
+	// connPool is the pool of control connections to the remote FTP server.
+	pool connPool
 
 	// ctx is only used for logging purposes and final termination, because neither the ftp
 	// nor the fuse implementation is context aware at this point.
@@ -36,9 +38,6 @@ type fuseImpl struct {
 
 	// cancel the ctx, and hence the GC loop
 	cancel context.CancelFunc
-
-	// connPool is the pool of control connections to the remote FTP server.
-	connPool connPool
 
 	// Next file handle. File handles are opaque to FUSE, and much faster to use than
 	// the full path
@@ -68,16 +67,11 @@ type info struct {
 	// this handle
 	conn *ftp.ServerConn
 
-	// writerConn is connection dedicated to the Write function, motivated by the fact that
-	// there might be simultaneous Read and Write operations on the same file handle.
-	writerConn *ftp.ServerConn
-
 	// rr and of is used when reading data from a remote file
 	rr *ftp.Response
 	of uint64
 
-	// The reader and writer stems from an io.Pipe() used when writing data to a remote file.
-	reader io.Reader
+	// The writer is the writer side of a io.Pipe() used when writing data to a remote file.
 	writer io.WriteCloser
 
 	// 1 is added to this wg when the reader/writer pair is created. Wait for it when closing the writer.
@@ -97,16 +91,13 @@ func (f *info) close(ctx context.Context, p *connPool) {
 	if f.writer != nil {
 		f.writer.Close()
 		f.writer = nil
-		f.reader = nil
-		p.put(ctx, f.writerConn)
-		f.writerConn = nil
-		f.wg.Wait()
 	}
 	if f.conn != nil {
 		p.put(ctx, f.conn)
 		f.conn = nil
 	}
 	f.of = 0
+	f.wg.Wait()
 }
 
 const stalePeriod = time.Second // Fuse default cache time
@@ -130,14 +121,14 @@ type FTPClient interface {
 func NewFTPClient(ctx context.Context, addr netip.AddrPort, dir string, readTimeout time.Duration) (FTPClient, error) {
 	f := &fuseImpl{
 		current: make(map[uint64]*info),
-		connPool: connPool{
+		pool: connPool{
 			dir:         dir,
 			readTimeout: readTimeout,
 		},
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
-	if err := f.connPool.setAddr(ctx, addr); err != nil {
+	if err := f.pool.setAddr(ctx, addr); err != nil {
 		cancel()
 		return nil, err
 	}
@@ -147,14 +138,9 @@ func NewFTPClient(ctx context.Context, addr netip.AddrPort, dir string, readTime
 }
 
 func (f *fuseImpl) SetAddress(ctx context.Context, addr netip.AddrPort) error {
-	return f.connPool.setAddr(ctx, addr)
-}
-
-func (f *fuseImpl) cacheSize() int {
 	f.Lock()
-	sz := len(f.current)
-	f.Unlock()
-	return sz
+	defer f.Unlock()
+	return f.pool.setAddr(ctx, addr)
 }
 
 // Create will create a file of size zero unless the file already exists
@@ -171,7 +157,9 @@ func (f *fuseImpl) Create(path string, flags int, _ uint32) (int, uint64) {
 // Destroy will send the QUIT message to the FTP server and disconnect
 func (f *fuseImpl) Destroy() {
 	dlog.Debug(f.ctx, "Destroy")
-	f.connPool.quit(f.ctx)
+	f.Lock()
+	f.pool.quit(f.ctx)
+	f.Unlock()
 	f.cancel()
 }
 
@@ -214,12 +202,12 @@ func (f *fuseImpl) Init() {
 				f.Lock()
 				for fh, fe := range f.current {
 					if fe.isStale(now) {
-						fe.close(f.ctx, &f.connPool)
+						fe.close(f.ctx, &f.pool)
 						delete(f.current, fh)
 					}
 				}
+				f.pool.tidy(f.ctx)
 				f.Unlock()
-				f.connPool.tidy(f.ctx)
 			}
 		}
 	}()
@@ -227,7 +215,7 @@ func (f *fuseImpl) Init() {
 
 func (f *fuseImpl) Mkdir(path string, mode uint32) int {
 	dlog.Debugf(f.ctx, "Mkdir(%s, %O)", path, mode)
-	err := f.connPool.withConn(f.ctx, func(conn *ftp.ServerConn) error {
+	err := f.withConn(f.ctx, func(conn *ftp.ServerConn) error {
 		return conn.MakeDir(relpath(path))
 	})
 	if err != nil {
@@ -309,8 +297,8 @@ func (f *fuseImpl) Read(path string, buff []byte, ofst int64, fh uint64) int {
 	bytesRead := 0
 	bytesToRead := len(buff)
 	for bytesToRead-bytesRead > 0 {
-		if f.connPool.readTimeout != 0 {
-			if err := fe.rr.SetDeadline(time.Now().Add(f.connPool.readTimeout)); err != nil {
+		if f.pool.readTimeout != 0 {
+			if err := fe.rr.SetDeadline(time.Now().Add(f.pool.readTimeout)); err != nil {
 				return f.errToFuseErr(err)
 			}
 		}
@@ -380,7 +368,7 @@ func (f *fuseImpl) Releasedir(path string, fh uint64) int {
 // Rename will rename or move oldpath to newpath
 func (f *fuseImpl) Rename(oldpath string, newpath string) int {
 	dlog.Debugf(f.ctx, "Rename(%s, %s)", oldpath, newpath)
-	return f.errToFuseErr(f.connPool.withConn(f.ctx, func(conn *ftp.ServerConn) error {
+	return f.errToFuseErr(f.withConn(f.ctx, func(conn *ftp.ServerConn) error {
 		if err := conn.Rename(relpath(oldpath), relpath(newpath)); err != nil {
 			return err
 		}
@@ -398,7 +386,7 @@ func (f *fuseImpl) Rename(oldpath string, newpath string) int {
 // Rmdir removes the directory at path. The directory must be empty
 func (f *fuseImpl) Rmdir(path string) int {
 	dlog.Debugf(f.ctx, "Rmdir(%s)", path)
-	return f.errToFuseErr(f.connPool.withConn(f.ctx, func(conn *ftp.ServerConn) error {
+	return f.errToFuseErr(f.withConn(f.ctx, func(conn *ftp.ServerConn) error {
 		if err := conn.RemoveDir(relpath(path)); err != nil {
 			return err
 		}
@@ -435,7 +423,7 @@ func (f *fuseImpl) Truncate(path string, size int64, fh uint64) int {
 // Unlink will remove the path from the file system.
 func (f *fuseImpl) Unlink(path string) int {
 	dlog.Debugf(f.ctx, "Unlink(%s)", path)
-	return f.errToFuseErr(f.connPool.withConn(f.ctx, func(conn *ftp.ServerConn) error {
+	return f.errToFuseErr(f.withConn(f.ctx, func(conn *ftp.ServerConn) error {
 		if err := conn.Delete(relpath(path)); err != nil {
 			return err
 		}
@@ -447,42 +435,63 @@ func (f *fuseImpl) Unlink(path string) int {
 // Write writes the gven data to a file at the given offset in that file. The
 // data connection that is established to facilitate the write will remain open
 // until the handle is released by a call to Release
-func (f *fuseImpl) Write(path string, buff []byte, ofst int64, fh uint64) int {
-	dlog.Debugf(f.ctx, "Write(%s, %d, %d, %d)", path, len(buff), ofst, fh)
+func (f *fuseImpl) Write(path string, buf []byte, ofst int64, fh uint64) int {
+	dlog.Debugf(f.ctx, "Write(%s, %d, %d, %d)", path, len(buf), ofst, fh)
 	fe, errCode := f.loadHandle(fh)
 	if errCode < 0 {
 		return errCode
 	}
 	of := uint64(ofst)
-	if fe.reader == nil {
-		fe.reader, fe.writer = io.Pipe()
-		fe.wg.Add(1)
-		if conn := fe.writerConn; conn == nil {
-			var err error
-			if conn, err = f.connPool.get(f.ctx); err != nil {
-				return f.errToFuseErr(err)
-			}
-			fe.writerConn = conn
+	var err error
+
+	// A connection dedicated to the Write function is needed because there
+	// might be simultaneous Read and Write operations on the same file handle.
+	f.Lock()
+	if fe.writer == nil {
+		var conn *ftp.ServerConn
+		if conn, err = f.pool.get(f.ctx); err == nil {
+			var reader io.Reader
+			reader, fe.writer = io.Pipe()
+
+			// start the pipe pumper. It ends when the fe.writer closes. That
+			// happens when Release is called
+			fe.wg.Add(1)
+			go func() {
+				defer func() {
+					fe.wg.Done() // essential to call Done before Lock, or close will hang
+					f.Lock()
+					f.pool.put(f.ctx, conn)
+					f.Unlock()
+				}()
+				if err := conn.StorFrom(relpath(path), reader, of); err != nil {
+					dlog.Errorf(f.ctx, "error storing: %v", err)
+				}
+			}()
 		}
-		go func() {
-			defer fe.wg.Done()
-			if err := fe.writerConn.StorFrom(relpath(path), fe.reader, of); err != nil {
-				dlog.Errorf(f.ctx, "error storing: %v", err)
-			}
-		}()
 	}
-	n, err := fe.writer.Write(buff)
+	f.Unlock()
+	if err != nil {
+		return f.errToFuseErr(err)
+	}
+	n, err := fe.writer.Write(buf)
 	if err != nil {
 		return f.errToFuseErr(err)
 	}
 	return n
 }
 
+func (f *fuseImpl) cacheSize() int {
+	f.Lock()
+	sz := len(f.current)
+	f.Unlock()
+	return sz
+}
+
 func (f *fuseImpl) clearPath(p string) {
 	f.Lock()
 	for fh, fe := range f.current {
 		if fe.path == p {
-			fe.close(f.ctx, &f.connPool)
+			fe.close(f.ctx, &f.pool)
 			delete(f.current, fh)
 		}
 	}
@@ -492,7 +501,7 @@ func (f *fuseImpl) clearPath(p string) {
 func (f *fuseImpl) delete(fh uint64) {
 	f.Lock()
 	if fe, ok := f.current[fh]; ok {
-		fe.close(f.ctx, &f.connPool)
+		fe.close(f.ctx, &f.pool)
 		delete(f.current, fh)
 	}
 	f.Unlock()
@@ -551,11 +560,11 @@ func (f *fuseImpl) openHandle(path string) (*info, int) {
 		}
 	}
 
-	conn, err := f.connPool.get(f.ctx)
+	conn, err := f.pool.get(f.ctx)
 	if err != nil {
 		return nil, f.errToFuseErr(err)
 	}
-	defer f.connPool.put(f.ctx, conn)
+	defer f.pool.put(f.ctx, conn)
 
 	nfe := &info{
 		path: path,
@@ -563,7 +572,6 @@ func (f *fuseImpl) openHandle(path string) (*info, int) {
 	}
 	nfe.Entry, err = conn.GetEntry(relpath(path))
 	if err != nil {
-		dlog.Debugf(f.ctx, "GetEntry: %v", err)
 		return nil, f.errToFuseErr(err)
 	}
 	f.current[f.nextHandle] = nfe
@@ -572,17 +580,19 @@ func (f *fuseImpl) openHandle(path string) (*info, int) {
 }
 
 func (f *fuseImpl) openDedicatedHandle(path string, create, append bool) (nfe *info, errCode int) {
-	conn, err := f.connPool.get(f.ctx)
+	f.Lock()
+	defer f.Unlock()
+	conn, err := f.pool.get(f.ctx)
 	if err != nil {
 		return nil, f.errToFuseErr(err)
 	}
+
 	defer func() {
 		if errCode != 0 {
-			f.connPool.put(f.ctx, conn)
+			f.pool.put(f.ctx, conn)
 		}
 	}()
 
-	f.Lock()
 	for _, fe := range f.current {
 		if fe.path == path {
 			if fe.conn == nil {
@@ -603,7 +613,6 @@ func (f *fuseImpl) openDedicatedHandle(path string, create, append bool) (nfe *i
 			break
 		}
 	}
-	f.Unlock()
 	if nfe != nil {
 		return nfe, 0
 	}
@@ -623,7 +632,6 @@ func (f *fuseImpl) openDedicatedHandle(path string, create, append bool) (nfe *i
 		}
 
 		// Create an empty file to ensure that it can be created
-		dlog.Debugf(f.ctx, "conn.Stor(%s)", rPath)
 		if err = conn.Stor(rPath, bytes.NewReader(nil)); err != nil {
 			return nil, f.errToFuseErr(err)
 		}
@@ -636,11 +644,32 @@ func (f *fuseImpl) openDedicatedHandle(path string, create, append bool) (nfe *i
 	if append {
 		nfe.of = nfe.Size
 	}
-	f.Lock()
 	f.current[f.nextHandle] = nfe
 	f.nextHandle++
-	f.Unlock()
 	return nfe, 0
+}
+
+func (f *fuseImpl) withConn(ctx context.Context, fn func(conn *ftp.ServerConn) error) error {
+	f.Lock()
+	conn, err := f.pool.get(ctx)
+	f.Unlock()
+	if err != nil {
+		return err
+	}
+	err = fn(conn)
+	f.Lock()
+	f.pool.put(ctx, conn)
+	f.Unlock()
+	return err
+}
+
+func containsAny(str string, ss ...string) bool {
+	for _, s := range ss {
+		if strings.Contains(str, s) {
+			return true
+		}
+	}
+	return false
 }
 
 func toStat(e *ftp.Entry, s *fuse.Stat_t) {
@@ -662,13 +691,4 @@ func toStat(e *ftp.Entry, s *fuse.Stat_t) {
 	s.Birthtim = s.Ctim
 	s.Nlink = 1
 	s.Flags = 0
-}
-
-func containsAny(str string, ss ...string) bool {
-	for _, s := range ss {
-		if strings.Contains(str, s) {
-			return true
-		}
-	}
-	return false
 }

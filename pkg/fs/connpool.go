@@ -3,7 +3,6 @@ package fs
 import (
 	"context"
 	"net/netip"
-	"sync"
 	"time"
 
 	"github.com/jlaffaye/ftp"
@@ -34,7 +33,6 @@ func (cl *connList) size() int {
 }
 
 type connPool struct {
-	sync.Mutex
 	addr        netip.AddrPort
 	dir         string
 	readTimeout time.Duration
@@ -73,7 +71,6 @@ func (p *connPool) connect(ctx context.Context) (*ftp.ServerConn, error) {
 
 // get returns a connection from the pool, or creates a new connection if needed
 func (p *connPool) get(ctx context.Context) (conn *ftp.ServerConn, err error) {
-	p.Lock()
 	if idle := p.idleList; idle != nil {
 		p.idleList = idle.next
 		idle.next = p.busyList
@@ -81,7 +78,6 @@ func (p *connPool) get(ctx context.Context) (conn *ftp.ServerConn, err error) {
 		conn = idle.conn
 	}
 	p.logSz(ctx, "get")
-	p.Unlock()
 	if conn == nil {
 		conn, err = p.connect(ctx)
 	}
@@ -96,14 +92,11 @@ func (p *connPool) logSz(ctx context.Context, pfx string) {
 // setAddr will call Quit on all open connections, both busy and idle, change
 // the address, reconnect one connection, and put it in the idle list.
 func (p *connPool) setAddr(ctx context.Context, addr netip.AddrPort) error {
-	p.Lock()
 	if p.addr == addr {
-		p.Unlock()
 		return nil
 	}
 	p.doQuit(ctx, true) // attempt to clear current connections, but ignore errors
 	p.addr = addr
-	p.Unlock()
 
 	// Create the first connection up front, so that a failure to connect to the server is caught early
 	conn, err := p.connect(ctx)
@@ -116,7 +109,6 @@ func (p *connPool) setAddr(ctx context.Context, addr netip.AddrPort) error {
 
 // put returns a connection to the pool
 func (p *connPool) put(ctx context.Context, conn *ftp.ServerConn) {
-	p.Lock()
 	// remove from busyList
 	removed := false
 	var prev *connList
@@ -145,7 +137,6 @@ func (p *connPool) put(ctx context.Context, conn *ftp.ServerConn) {
 		p.idleList = cl
 		p.logSz(ctx, "put")
 	}
-	p.Unlock()
 }
 
 // quit calls the Quit method on all connections and empties the pool
@@ -158,8 +149,6 @@ func (p *connPool) doQuit(ctx context.Context, silent bool) {
 
 // quit calls the Quit method on all connections and empties the pool
 func (p *connPool) quit(ctx context.Context) {
-	p.Lock()
-	defer p.Unlock()
 	p.doQuit(ctx, false)
 }
 
@@ -167,8 +156,6 @@ func (p *connPool) quit(ctx context.Context) {
 // only closes connections that are idle at the time the call is made, there
 // might still be more than 2 connections after the call returns.
 func (p *connPool) tidy(ctx context.Context) {
-	p.Lock()
-	defer p.Unlock()
 	iz := p.idleList.size()
 	bz := p.busyList.size()
 	sz := iz + bz
@@ -192,14 +179,4 @@ func (p *connPool) tidy(ctx context.Context) {
 		}
 		prev = idle
 	}
-}
-
-func (p *connPool) withConn(ctx context.Context, f func(conn *ftp.ServerConn) error) error {
-	conn, err := p.get(ctx)
-	if err != nil {
-		return err
-	}
-	err = f(conn)
-	p.put(ctx, conn)
-	return err
 }
