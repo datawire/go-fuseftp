@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -120,16 +121,16 @@ func (w *tbWrapper) UnformattedLogln(level dlog.LogLevel, args ...any) {
 const remoteDir = "exported"
 
 // startFTPServer starts an FTP server and returns the directory that it exports and the port that it is listening to
-func startFTPServer(t *testing.T, ctx context.Context, wg *sync.WaitGroup) (string, uint16) {
-	root := t.TempDir()
-	export := filepath.Join(root, remoteDir)
-	require.NoError(t, os.Mkdir(export, 0755))
+func startFTPServer(t *testing.T, ctx context.Context, dir string, wg *sync.WaitGroup) (string, uint16) {
+	dir = filepath.Join(dir, "server")
+	export := filepath.Join(dir, remoteDir)
+	require.NoError(t, os.MkdirAll(export, 0755))
 	portCh := make(chan uint16)
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		assert.NoError(t, server.Start(ctx, "127.0.0.1", root, portCh))
+		assert.NoError(t, server.Start(ctx, "127.0.0.1", dir, portCh))
 	}()
 
 	select {
@@ -140,6 +141,22 @@ func startFTPServer(t *testing.T, ctx context.Context, wg *sync.WaitGroup) (stri
 	}
 }
 
+func startFUSEHost(t *testing.T, ctx context.Context, port uint16, dir string) (FTPClient, *FuseHost, string) {
+	// Start the client
+	dir = filepath.Join(dir, "mount")
+	require.NoError(t, os.Mkdir(dir, 0755))
+	fsh, err := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), remoteDir, time.Second)
+	require.NoError(t, err)
+	mp := dir
+	if runtime.GOOS == "windows" {
+		mp = "T:"
+		dir = mp + `\`
+	}
+	host := NewHost(fsh, mp)
+	host.Start(ctx)
+	return fsh, host, dir
+}
+
 func TestConnectFailure(t *testing.T) {
 	ctx := dlog.WithLogger(context.Background(), NewTestLogger(t, dlog.LogLevelInfo))
 	_, err := NewFTPClient(ctx, netip.MustParseAddrPort("198.51.100.32:21"), "", time.Second)
@@ -148,20 +165,15 @@ func TestConnectFailure(t *testing.T) {
 
 func TestBrokenConnection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	ctx = dlog.WithLogger(ctx, NewTestLogger(t, dlog.LogLevelInfo))
+	ctx = dlog.WithLogger(ctx, NewTestLogger(t, dlog.LogLevelDebug))
 
 	wg := sync.WaitGroup{}
 	serverCtx, serverCancel := context.WithCancel(ctx)
-	root, port := startFTPServer(t, serverCtx, &wg)
+	tmp := t.TempDir()
+	root, port := startFTPServer(t, serverCtx, tmp, &wg)
 	require.NotEqual(t, uint16(0), port)
 
-	// Start the client
-	fsh, err := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), remoteDir, time.Second)
-	require.NoError(t, err)
-
-	mountPoint := t.TempDir()
-	host := NewHost(fsh, mountPoint)
-	host.Start(ctx)
+	fsh, host, mountPoint := startFUSEHost(t, ctx, port, tmp)
 	t.Cleanup(func() {
 		host.Stop()
 		cancel()
@@ -169,7 +181,7 @@ func TestBrokenConnection(t *testing.T) {
 	contents := []byte("Some text\n")
 	require.NoError(t, os.WriteFile(filepath.Join(root, "test1.txt"), contents, 0644))
 	// Wait for things to get set up.
-	time.Sleep(3 * time.Second)
+	time.Sleep(2 * time.Second)
 
 	test1Mounted, err := os.ReadFile(filepath.Join(mountPoint, "test1.txt"))
 	require.NoError(t, err, fmt.Sprintf("%s ReadFile: %v", time.Now().Format("15:04:05.0000"), err))
@@ -216,7 +228,7 @@ func TestBrokenConnection(t *testing.T) {
 
 	t.Run("Restart", func(t *testing.T) {
 		// Start a new server
-		root, port = startFTPServer(t, ctx, &wg)
+		root, port = startFTPServer(t, ctx, tmp, &wg)
 		require.NotEqual(t, uint16(0), port)
 		require.NoError(t, os.WriteFile(filepath.Join(root, "test1.txt"), contents, 0644))
 
@@ -232,19 +244,14 @@ func TestBrokenConnection(t *testing.T) {
 
 func TestConnectedToServer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	ctx = dlog.WithLogger(ctx, NewTestLogger(t, dlog.LogLevelDebug))
+	ctx = dlog.WithLogger(ctx, NewTestLogger(t, dlog.LogLevelInfo))
 
 	wg := sync.WaitGroup{}
-	root, port := startFTPServer(t, ctx, &wg)
+	tmp := t.TempDir()
+	root, port := startFTPServer(t, ctx, tmp, &wg)
 	require.NotEqual(t, uint16(0), port)
 
-	// Start the client
-	fsh, err := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), remoteDir, time.Second)
-	require.NoError(t, err)
-
-	mountPoint := t.TempDir()
-	host := NewHost(fsh, mountPoint)
-	host.Start(ctx)
+	fsh, host, mountPoint := startFUSEHost(t, ctx, port, tmp)
 	t.Cleanup(func() {
 		host.Stop()
 		cancel()
