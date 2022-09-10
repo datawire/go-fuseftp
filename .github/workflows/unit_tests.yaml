@@ -4,16 +4,11 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
-      - name: install dependencies
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
-          sudo apt-get update
-          sudo apt-get install -y libfuse-dev
       - uses: actions/checkout@v3
-      - name: Setup go
-        uses: actions/setup-go@v3
+      - name: Run build
+        uses: ./.github/actions/build-linux
         with:
-          go-version: 1.18
+          go-version: 1.19
       - name: Run lint
         uses: golangci/golangci-lint-action@v3
       - name: Run tests
@@ -28,39 +23,27 @@ jobs:
   macos:
     runs-on: macos-latest
     steps:
-      - name: install dependencies
-        run: |
-          brew update
-          brew install --cask macfuse
       - uses: actions/checkout@v3
-      - name: Setup go
-        uses: actions/setup-go@v3
+      - name: Run build
+        uses: ./.github/actions/build-macos
         with:
-          go-version: 1.18
-      - name: Run lint
-        uses: golangci/golangci-lint-action@v3
-# We are not currently running the tests on macOS because the brew install doesn't
-# fix the Kext-Loading. The tests must remain disabled until GitHub provides a macOS
-# image with macfuse preinstalled, or some other viable solution pops up.
-# See https://github.com/osxfuse/osxfuse/issues/879#issuecomment-1114140186 for more info
-#      - name: Run tests
-#        run: make test
+          go-version: 1.19
+      - name: Run tests
+        # We are not currently running the tests on macOS because the brew install doesn't
+        # fix the Kext-Loading. The tests must remain disabled until GitHub provides a macOS
+        # image with macfuse preinstalled, or some other viable solution pops up.
+        # See https://github.com/osxfuse/osxfuse/issues/879#issuecomment-1114140186 for more info
+        if: false
+        shell: bash
+        run: CGO_ENABLED=0 go test ./...
   windows:
     runs-on: windows-latest
     steps:
-      - name: Download winfsp
-        shell: bash
-        run: |
-          curl -L -o winfsp.msi https://github.com/winfsp/winfsp/releases/download/v1.11/winfsp-1.11.22176.msi
-      - name: Install winfsp
-        shell: powershell
-        run: |
-          Start-Process msiexec -Wait -verb runAs -Args "/i winfsp.msi /passive /qn /L*V winfsp-install.log"
-          [Environment]::SetEnvironmentVariable("Path", "C:\\;C:\\Program Files (x86)\\WinFsp\\inc\\fuse;$ENV:Path", "Machine")
       - uses: actions/checkout@v3
-      - uses: actions/setup-go@v3
+      - name: Run build
+        uses: ./.github/actions/build-windows
         with:
-          go-version: 1.18
+          go-version: 1.19
       - name: Run tests
         shell: bash
         run: CGO_ENABLED=0 go test ./...

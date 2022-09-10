@@ -1,0 +1,25 @@
+name: Build fuseftp on Linux
+description: Builds the fuseftp binary on Linux amd64 and arm64
+inputs:
+  go-version:
+    description: Version of the go distro, e.g. 1.19
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: install dependencies
+      shell: bash
+      run: |
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+        sudo apt-get update
+        sudo apt-get install -y libfuse-dev gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+    - name: Setup go
+      uses: actions/setup-go@v3
+      with:
+        go-version: ${{ inputs.go-version }}
+    - name: Make fuseftp-linux-amd64
+      shell: bash
+      run: CGO_ENABLED=1 make fuseftp
+    - name: Make fuseftp-linux-arm64
+      shell: bash
+      run: CGO_ENABLED=1 GOARCH=arm64 CC=aarch64-linux-gnu-gcc make fuseftp

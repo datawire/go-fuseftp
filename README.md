@@ -27,11 +27,11 @@ The `cgofuse` library relies on CGO, and that the headers for libfuse is install
 ```console
 $ sudo apt-get install -y libfuse-dev
 ```
-Once installed, the package can be tested using:
+Once installed, the package can be unit tested using:
 ```console
 $ make test
 ```
-Or just built using:
+The gRPC server binary is built using:
 ```console
-$ make build
+$ make fuseftp
 ```

@@ -1,0 +1,57 @@
+syntax = "proto3";
+package datawire.fuseftp;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/duration.proto";
+
+option go_package = "github.com/datawire/go-fuseftp/rpc";
+
+// The Connector service is responsible for connecting to the traffic manager
+// and manage intercepts. It can only run when a Daemon is running.
+service FuseFTP {
+  // Returns version information from the Connector
+  rpc Version(google.protobuf.Empty) returns (VersionInfo);
+
+  // Mounts a remote directory and returns an identifier for the mount
+  rpc Mount(MountRequest) returns (MountIdentifier);
+
+  // Unmounts the given identifier
+  rpc Unmount(MountIdentifier) returns (google.protobuf.Empty);
+
+  // SetFtpServer changes the FTP server for a given mount identifier
+  rpc SetFtpServer(SetFtpServerRequest) returns (google.protobuf.Empty);
+}
+
+message VersionInfo {
+  string semver = 1;
+}
+
+message AddressAndPort {
+   bytes ip = 1;
+
+   int32 port = 2;
+}
+
+message MountIdentifier {
+  int32 id = 1;
+}
+
+message SetFtpServerRequest {
+  MountIdentifier id = 1;
+
+  AddressAndPort ftp_server = 2;
+}
+
+message MountRequest {
+  // The mount point on the local computer. Must be a drive letter on windows
+  string mount_point = 1;
+
+  // The ftp_server to connect to
+  AddressAndPort ftp_server = 2;
+
+  // Read timout
+  google.protobuf.Duration read_timeout = 3;
+
+  // The directory on the FTP server that gets mounted
+  string directory = 4;
+}
