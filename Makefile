@@ -14,7 +14,10 @@ help:
 
 SHELL := bash
 
-ifeq ($(GOHOSTOS),windows)
+GOARCH ?= $(shell go env GOARCH)
+GOOS ?= $(shell go env GOOS)
+
+ifeq ($(GOOS),windows)
   EXE=.exe
 else
   EXE=
@@ -44,9 +47,6 @@ rpc/fuseftp.pb.go rpc/fuseftp.grpc_pb.go: rpc/fuseftp.proto $(TOOLS)/protoc$(EXE
 
 BUILD_OUTPUT = build-output
 BIN_OUTPUT = $(BUILD_OUTPUT)/bin
-
-GOARCH ?= $(shell go env GOARCH)
-GOOS ?= $(shell go env GOOS)
 
 .PHONY: fuseftp
 fuseftp: $(BIN_OUTPUT)/fuseftp-$(GOOS)-$(GOARCH)$(EXE)
