@@ -71,6 +71,7 @@ func (s *service) Mount(_ context.Context, rq *rpc.MountRequest) (*rpc.MountIden
 		return nil, status.Errorf(codes.Internal, err.Error())
 	}
 	host := fs.NewHost(fi, rq.MountPoint)
+	host.Start(ctx)
 
 	id := s.nextID
 	s.mounts[id] = &mount{
