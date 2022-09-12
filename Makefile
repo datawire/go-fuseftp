@@ -1,14 +1,6 @@
 #
 # Intro
 
-help:
-	@echo 'Usage:'
-	@echo '  make help'
-	@echo '  make cover'
-	@echo '  make test'
-	@echo '  make lint'
-.PHONY: help
-
 .SECONDARY:
 .PHONY: FORCE
 
@@ -88,5 +80,5 @@ tools/$(PROTOC_ZIP):
 %/bin/protoc$(EXE) %/include %/readme.txt: %/$(PROTOC_ZIP)
 	cd $* && unzip -q -o -DD $(<F)
 
-$(TOOLS)/%: tools/src/%/go.mod tools/src/%/pin.go
+$(TOOLS)/%$(EXE): tools/src/%/go.mod tools/src/%/pin.go
 	cd $(<D) && GOOS= GOARCH= go build -o $(abspath $@) $$(sed -En 's,^import "(.*)".*,\1,p' pin.go)
