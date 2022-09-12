@@ -49,9 +49,9 @@ GOARCH ?= $(shell go env GOARCH)
 GOOS ?= $(shell go env GOOS)
 
 .PHONY: fuseftp
-fuseftp: $(BIN_OUTPUT)/fuseftp-$(GOOS)-$(GOARCH)
+fuseftp: $(BIN_OUTPUT)/fuseftp-$(GOOS)-$(GOARCH)$(EXE)
 
-$(BIN_OUTPUT)/fuseftp-$(GOOS)-$(GOARCH): rpc/fuseftp.pb.go rpc/fuseftp.grpc_pb.go $(wildcard pkg/fs/*.go) $(wildcard pkg/main/*.go)
+$(BIN_OUTPUT)/fuseftp-$(GOOS)-$(GOARCH)$(EXE): rpc/fuseftp.pb.go rpc/fuseftp.grpc_pb.go $(wildcard pkg/fs/*.go) $(wildcard pkg/main/*.go)
 	mkdir -p $(BIN_OUTPUT)
 	go build -o $@ ./pkg/main/...
 

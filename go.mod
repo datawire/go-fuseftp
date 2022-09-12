@@ -4,7 +4,7 @@ go 1.18
 
 require (
 	github.com/datawire/dlib v1.3.1-0.20220715022530-b09ab2e017e1
-	github.com/datawire/go-fuseftp/rpc v0.1.3
+	github.com/datawire/go-fuseftp/rpc v0.1.4
 	github.com/fclairamb/ftpserverlib v0.19.1
 	github.com/fclairamb/go-log v0.4.1
 	github.com/jlaffaye/ftp v0.0.0-20220821212529-0aeb8660a7e2
