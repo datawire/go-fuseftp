@@ -4,6 +4,8 @@ inputs:
   go-version:
     description: Version of the go distro, e.g. 1.19
     required: true
+  upload:
+    default: false
 runs:
   using: composite
   steps:
@@ -23,3 +25,10 @@ runs:
     - name: Make fuseftp-linux-arm64
       shell: bash
       run: CGO_ENABLED=1 GOARCH=arm64 CC=aarch64-linux-gnu-gcc make fuseftp
+    - name: Upload binaries
+      if: ${{ inputs.upload }}
+      uses: actions/upload-artifact@v3
+      with:
+        name: linux-binaries
+        path: build-output/bin
+        retention-days: 1
