@@ -35,6 +35,7 @@ func (fh *FuseHost) Start(ctx context.Context) {
 		"-o", "default_permissions",
 		"-o", "auto_cache",
 		"-o", "sync_read",
+		"-o", "allow_root",
 	}
 	if runtime.GOOS == "windows" {
 		// WinFsp requires this to create files with the same
