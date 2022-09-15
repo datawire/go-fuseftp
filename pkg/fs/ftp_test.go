@@ -21,7 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/datawire/dlib/dlog"
-	"github.com/datawire/go-fuseftp/pkg/server"
+	server "github.com/datawire/go-ftpserver"
 )
 
 type tbWrapper struct {
