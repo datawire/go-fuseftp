@@ -45,6 +45,8 @@ type fuseImpl struct {
 
 	// current maps file handles to info structs
 	current map[uint64]*info
+
+	infos map[string]*ftp.Entry
 }
 
 // info holds information about file or directory that has been obtained from
@@ -53,7 +55,7 @@ type fuseImpl struct {
 // responsible for maintaining a ftp.Response during Read, and a pipe (reader/writer pair)
 // during Write.
 type info struct {
-	*ftp.Entry
+	*fuseImpl
 
 	// path is used to find already existing file handles. Their ftp.Entry can be
 	// reused which means that no MLST call is required for subsequent accesses to
@@ -78,32 +80,53 @@ type info struct {
 	wg sync.WaitGroup
 }
 
-func (f *info) toStat(s *fuse.Stat_t) {
-	toStat(f.Entry, s)
+func (i *info) entry() *ftp.Entry {
+	return i.infos[i.path]
+}
+func (i *info) toStat(s *fuse.Stat_t) {
+	i.Lock()
+	toStat(i.entry(), s)
+	i.Unlock()
 }
 
 // close this handle and free up any resources that it holds.
-func (f *info) close(ctx context.Context, p *connPool) {
-	if f.rr != nil {
-		f.rr.Close()
-		f.rr = nil
+func (i *info) close(ctx context.Context, p *connPool) {
+	if i.rr != nil {
+		i.rr.Close()
+		i.rr = nil
 	}
-	if f.writer != nil {
-		f.writer.Close()
-		f.writer = nil
+	if i.writer != nil {
+		i.writer.Close()
+		i.writer = nil
 	}
-	if f.conn != nil {
-		p.put(ctx, f.conn)
-		f.conn = nil
+	if i.conn != nil {
+		p.put(ctx, i.conn)
+		i.conn = nil
 	}
-	f.of = 0
-	f.wg.Wait()
+	i.of = 0
+	i.wg.Wait()
+}
+
+func (i *info) delete() {
+	i.close(i.ctx, &i.pool)
+	path := i.path
+	delete(i.current, i.fh)
+	found := false
+	for _, fe := range i.current {
+		if fe.path == path {
+			found = true
+			break
+		}
+	}
+	if !found {
+		delete(i.infos, path)
+	}
 }
 
 const stalePeriod = time.Second // Fuse default cache time
 
-func (f *info) isStale(now time.Time) bool {
-	return f.rr == nil && f.writer == nil && now.Sub(f.Time) >= stalePeriod
+func (i *info) isStale(now time.Time) bool {
+	return i.rr == nil && i.writer == nil && now.Sub(i.entry().Time) >= stalePeriod
 }
 
 type FTPClient interface {
@@ -121,6 +144,7 @@ type FTPClient interface {
 func NewFTPClient(ctx context.Context, addr netip.AddrPort, dir string, readTimeout time.Duration) (FTPClient, error) {
 	f := &fuseImpl{
 		current: make(map[uint64]*info),
+		infos:   make(map[string]*ftp.Entry),
 		pool: connPool{
 			dir:         dir,
 			readTimeout: readTimeout,
@@ -147,7 +171,7 @@ func (f *fuseImpl) SetAddress(ctx context.Context, addr netip.AddrPort) error {
 // The third argument, the mode bits, are currently ignored
 func (f *fuseImpl) Create(path string, flags int, _ uint32) (int, uint64) {
 	dlog.Debugf(f.ctx, "Create(%s, %#x)", path, flags)
-	fe, errCode := f.openDedicatedHandle(path, true, flags&os.O_APPEND == os.O_APPEND)
+	fe, _, errCode := f.openDedicatedHandle(path, true, flags&os.O_APPEND == os.O_APPEND)
 	if errCode < 0 {
 		return errCode, 0
 	}
@@ -164,8 +188,8 @@ func (f *fuseImpl) Destroy() {
 }
 
 // Flush is a noop in this implementation
-func (f *fuseImpl) Flush(path string, _ uint64) int {
-	dlog.Debugf(f.ctx, "Flush(%s)", path)
+func (f *fuseImpl) Flush(path string, fh uint64) int {
+	dlog.Debugf(f.ctx, "Flush(%s, %d)", path, fh)
 	return 0
 }
 
@@ -200,10 +224,9 @@ func (f *fuseImpl) Init() {
 				return
 			case now := <-ticker.C:
 				f.Lock()
-				for fh, fe := range f.current {
+				for _, fe := range f.current {
 					if fe.isStale(now) {
-						fe.close(f.ctx, &f.pool)
-						delete(f.current, fh)
+						fe.delete()
 					}
 				}
 				f.pool.tidy(f.ctx)
@@ -224,14 +247,15 @@ func (f *fuseImpl) Mkdir(path string, mode uint32) int {
 
 	// fuse will issue a Getattr after Mkdir, so we save a MLST call by adding what we already know
 	f.Lock()
+	f.infos[path] = &ftp.Entry{
+		Name: filepath.Base(path),
+		Type: ftp.EntryTypeFolder,
+		Time: time.Now(),
+	}
 	f.current[f.nextHandle] = &info{
-		Entry: &ftp.Entry{
-			Name: filepath.Base(relpath(path)),
-			Type: ftp.EntryTypeFolder,
-			Time: time.Now(),
-		},
-		path: path,
-		fh:   f.nextHandle,
+		fuseImpl: f,
+		path:     path,
+		fh:       f.nextHandle,
 	}
 	f.nextHandle++
 	f.Unlock()
@@ -242,7 +266,7 @@ func (f *fuseImpl) Mkdir(path string, mode uint32) int {
 // a file of size zero can be created in the server.
 func (f *fuseImpl) Open(path string, flags int) (int, uint64) {
 	dlog.Debugf(f.ctx, "Open(%s, %#x)", path, flags)
-	fe, errCode := f.openDedicatedHandle(path, flags&os.O_CREATE == os.O_CREATE, flags&os.O_APPEND == os.O_APPEND)
+	fe, _, errCode := f.openDedicatedHandle(path, flags&os.O_CREATE == os.O_CREATE, flags&os.O_APPEND == os.O_APPEND)
 	if errCode < 0 {
 		return errCode, 0
 	}
@@ -252,11 +276,11 @@ func (f *fuseImpl) Open(path string, flags int) (int, uint64) {
 // Opendir is like Open but will fail unless the path represents a directory
 func (f *fuseImpl) Opendir(path string) (int, uint64) {
 	dlog.Debugf(f.ctx, "Opendir(%s)", path)
-	fe, errCode := f.openDedicatedHandle(path, false, false)
+	fe, e, errCode := f.openDedicatedHandle(path, false, false)
 	if errCode < 0 {
 		return errCode, 0
 	}
-	if fe.Type != ftp.EntryTypeFolder {
+	if e.Type != ftp.EntryTypeFolder {
 		f.delete(fe.fh)
 		return -fuse.ENOTDIR, 0
 	}
@@ -271,7 +295,7 @@ func (f *fuseImpl) Opendir(path string) (int, uint64) {
 // Read requires that fuse is started with -o sync_read to ensure that the
 // read calls arrive in sequence.
 func (f *fuseImpl) Read(path string, buff []byte, ofst int64, fh uint64) int {
-	dlog.Debugf(f.ctx, "Read(%s, %d, %d, %d)", path, len(buff), ofst, fh)
+	dlog.Debugf(f.ctx, "Read(%s, sz=%d, off=%d, %d)", path, len(buff), ofst, fh)
 	fe, errCode := f.loadHandle(fh)
 	if errCode < 0 {
 		return errCode
@@ -329,7 +353,7 @@ func (f *fuseImpl) Readdir(path string, fill func(name string, stat *fuse.Stat_t
 	var fe *info
 	var errCode int
 	if fh == math.MaxUint64 {
-		fe, errCode = f.openDedicatedHandle(path, false, false)
+		fe, _, errCode = f.openDedicatedHandle(path, false, false)
 		defer f.delete(fe.fh)
 	} else {
 		fe, errCode = f.loadHandle(fh)
@@ -368,15 +392,23 @@ func (f *fuseImpl) Releasedir(path string, fh uint64) int {
 // Rename will rename or move oldpath to newpath
 func (f *fuseImpl) Rename(oldpath string, newpath string) int {
 	dlog.Debugf(f.ctx, "Rename(%s, %s)", oldpath, newpath)
+	if oldpath == newpath {
+		return 0
+	}
 	return f.errToFuseErr(f.withConn(f.ctx, func(conn *ftp.ServerConn) error {
 		if err := conn.Rename(relpath(oldpath), relpath(newpath)); err != nil {
 			return err
 		}
 		f.Lock()
-		for _, fe := range f.current {
-			if fe.path == oldpath {
-				fe.path = newpath
+		if e, ok := f.infos[oldpath]; ok {
+			for _, fe := range f.current {
+				if fe.path == oldpath {
+					fe.path = newpath
+				}
 			}
+			e.Name = filepath.Base(newpath)
+			delete(f.infos, oldpath)
+			f.infos[newpath] = e
 		}
 		f.Unlock()
 		return nil
@@ -398,25 +430,32 @@ func (f *fuseImpl) Rmdir(path string) int {
 // Truncate will truncate the given file to a certain size using a STOR command
 // with zero bytes and an offset. This behavior will only work with some servers.
 func (f *fuseImpl) Truncate(path string, size int64, fh uint64) int {
-	dlog.Debugf(f.ctx, "Truncate(%s, %d, %d)", path, size, fh)
+	dlog.Debugf(f.ctx, "Truncate(%s, sz=%d, %d)", path, size, fh)
 	var fe *info
+	var e *ftp.Entry
 	var errCode int
 	if fh == math.MaxUint64 {
-		fe, errCode = f.openDedicatedHandle(path, false, false)
+		fe, e, errCode = f.openDedicatedHandle(path, false, false)
 		defer f.delete(fe.fh)
 	} else {
 		fe, errCode = f.loadHandle(fh)
+		f.Lock()
+		e = fe.entry()
+		f.Unlock()
 	}
 	if errCode < 0 {
 		return errCode
 	}
 	sz := uint64(size)
-	if fe.Size <= sz {
+	if e.Size <= sz {
 		return 0
 	}
 	if err := fe.conn.StorFrom(relpath(path), bytes.NewReader(nil), sz); err != nil {
 		return f.errToFuseErr(err)
 	}
+	// macFUSE will check the size of an opened file that is truncated using a stat call
+	// and perform weird things unless the truncated size is reported instantly.
+	e.Size = sz
 	return 0
 }
 
@@ -436,7 +475,7 @@ func (f *fuseImpl) Unlink(path string) int {
 // data connection that is established to facilitate the write will remain open
 // until the handle is released by a call to Release
 func (f *fuseImpl) Write(path string, buf []byte, ofst int64, fh uint64) int {
-	dlog.Debugf(f.ctx, "Write(%s, %d, %d, %d)", path, len(buf), ofst, fh)
+	dlog.Debugf(f.ctx, "Write(%s, sz=%d, off=%d, %d)", path, len(buf), ofst, fh)
 	fe, errCode := f.loadHandle(fh)
 	if errCode < 0 {
 		return errCode
@@ -489,10 +528,9 @@ func (f *fuseImpl) cacheSize() int {
 
 func (f *fuseImpl) clearPath(p string) {
 	f.Lock()
-	for fh, fe := range f.current {
+	for _, fe := range f.current {
 		if fe.path == p {
-			fe.close(f.ctx, &f.pool)
-			delete(f.current, fh)
+			fe.delete()
 		}
 	}
 	f.Unlock()
@@ -501,8 +539,7 @@ func (f *fuseImpl) clearPath(p string) {
 func (f *fuseImpl) delete(fh uint64) {
 	f.Lock()
 	if fe, ok := f.current[fh]; ok {
-		fe.close(f.ctx, &f.pool)
-		delete(f.current, fh)
+		fe.delete()
 	}
 	f.Unlock()
 }
@@ -514,9 +551,9 @@ func (f *fuseImpl) errToFuseErr(err error) int {
 
 	em := err.Error()
 	switch {
-	case strings.HasPrefix(em, ftp.StatusText(ftp.StatusCommandOK)+" "):
+	case strings.HasPrefix(em, fmt.Sprintf("%d ", ftp.StatusCommandOK)):
 		return 0
-	case strings.HasPrefix(em, ftp.StatusText(ftp.StatusClosingDataConnection)+" "), strings.Contains(em, errConnAborted):
+	case strings.HasPrefix(em, fmt.Sprintf("%d ", ftp.StatusClosingDataConnection)), strings.Contains(em, errConnAborted):
 		return -fuse.ECONNABORTED
 	case containsAny(em, fs.ErrNotExist.Error(), errFileNotFound, errDirNotFound):
 		return -fuse.ENOENT
@@ -566,25 +603,42 @@ func (f *fuseImpl) openHandle(path string) (*info, int) {
 	}
 	defer f.pool.put(f.ctx, conn)
 
-	nfe := &info{
-		path: path,
-		fh:   f.nextHandle,
-	}
-	nfe.Entry, err = conn.GetEntry(relpath(path))
-	if err != nil {
+	if err = f.getEntry(path, conn); err != nil {
 		return nil, f.errToFuseErr(err)
+	}
+	nfe := &info{
+		fuseImpl: f,
+		path:     path,
+		fh:       f.nextHandle,
 	}
 	f.current[f.nextHandle] = nfe
 	f.nextHandle++
 	return nfe, 0
 }
 
-func (f *fuseImpl) openDedicatedHandle(path string, create, append bool) (nfe *info, errCode int) {
+func (f *fuseImpl) getEntry(path string, conn *ftp.ServerConn) error {
+	var ok bool
+	if _, ok = f.infos[path]; ok {
+		return nil
+	}
+	return f.refreshEntry(path, conn)
+}
+
+func (f *fuseImpl) refreshEntry(path string, conn *ftp.ServerConn) error {
+	e, err := conn.GetEntry(relpath(path))
+	if err != nil {
+		return err
+	}
+	f.infos[path] = e
+	return nil
+}
+
+func (f *fuseImpl) openDedicatedHandle(path string, create, append bool) (nfe *info, e *ftp.Entry, errCode int) {
 	f.Lock()
 	defer f.Unlock()
 	conn, err := f.pool.get(f.ctx)
 	if err != nil {
-		return nil, f.errToFuseErr(err)
+		return nil, nil, f.errToFuseErr(err)
 	}
 
 	defer func() {
@@ -593,47 +647,35 @@ func (f *fuseImpl) openDedicatedHandle(path string, create, append bool) (nfe *i
 		}
 	}()
 
-	var e *ftp.Entry
-	for _, fe := range f.current {
-		if fe.path == path {
-			e = fe.Entry
-			break
+	if err = f.getEntry(path, conn); err != nil {
+		errCode = f.errToFuseErr(err)
+		if !(create && errCode == -fuse.ENOENT) {
+			return nil, nil, errCode
 		}
-	}
 
-	if e == nil {
-		rPath := relpath(path)
-		e, err = conn.GetEntry(rPath)
-		if err != nil {
-			errCode = f.errToFuseErr(err)
-			if !(create && errCode == -fuse.ENOENT) {
-				return nil, errCode
-			}
-
-			// Create an empty file to ensure that it can be created
-			if err = conn.Stor(rPath, bytes.NewReader(nil)); err != nil {
-				return nil, f.errToFuseErr(err)
-			}
-			e = &ftp.Entry{
-				Name: filepath.Base(rPath),
-				Type: ftp.EntryTypeFile,
-				Time: time.Now(),
-			}
+		// Create an empty file to ensure that it can be created
+		if err = conn.Stor(relpath(path), bytes.NewReader(nil)); err != nil {
+			return nil, nil, f.errToFuseErr(err)
+		}
+		f.infos[path] = &ftp.Entry{
+			Name: filepath.Base(path),
+			Type: ftp.EntryTypeFile,
+			Time: time.Now(),
 		}
 	}
 
 	nfe = &info{
-		Entry: e,
-		path:  path,
-		fh:    f.nextHandle,
-		conn:  conn,
+		fuseImpl: f,
+		path:     path,
+		fh:       f.nextHandle,
+		conn:     conn,
 	}
 	if append {
-		nfe.of = nfe.Size
+		nfe.of = nfe.entry().Size
 	}
 	f.current[f.nextHandle] = nfe
 	f.nextHandle++
-	return nfe, 0
+	return nfe, nfe.entry(), 0
 }
 
 func (f *fuseImpl) withConn(ctx context.Context, fn func(conn *ftp.ServerConn) error) error {

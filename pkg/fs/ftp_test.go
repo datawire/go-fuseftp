@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -119,7 +121,26 @@ func (w *tbWrapper) UnformattedLogln(level dlog.LogLevel, args ...any) {
 }
 
 func testContext(t *testing.T) context.Context {
-	return dlog.WithLogger(context.Background(), NewTestLogger(t, dlog.LogLevelDebug))
+	lr := logrus.New()
+	lr.Level = logrus.DebugLevel
+	lr.SetFormatter(&logrus.TextFormatter{
+		ForceColors:               false,
+		DisableColors:             true,
+		ForceQuote:                false,
+		DisableQuote:              true,
+		EnvironmentOverrideColors: false,
+		DisableTimestamp:          true,
+		FullTimestamp:             false,
+		TimestampFormat:           "",
+		DisableSorting:            true,
+		SortingFunc:               nil,
+		DisableLevelTruncation:    true,
+		PadLevelText:              false,
+		QuoteEmptyFields:          false,
+		FieldMap:                  nil,
+		CallerPrettyfier:          nil,
+	})
+	return dlog.WithLogger(context.Background(), dlog.WrapLogrus(lr))
 }
 
 const remoteDir = "exported"
@@ -172,19 +193,20 @@ func TestBrokenConnection(t *testing.T) {
 
 	wg := sync.WaitGroup{}
 	serverCtx, serverCancel := context.WithCancel(ctx)
+	defer serverCancel()
+
 	tmp := t.TempDir()
 	root, port := startFTPServer(t, serverCtx, tmp, &wg)
 	require.NotEqual(t, uint16(0), port)
 
 	fsh, host, mountPoint := startFUSEHost(t, ctx, port, tmp)
-	t.Cleanup(func() {
-		host.Stop()
+	defer func() {
 		cancel()
-	})
+		host.Stop()
+	}()
+	time.Sleep(2 * time.Second)
 	contents := []byte("Some text\n")
 	require.NoError(t, os.WriteFile(filepath.Join(root, "test1.txt"), contents, 0644))
-	// Wait for things to get set up.
-	time.Sleep(2 * time.Second)
 
 	test1Mounted, err := os.ReadFile(filepath.Join(mountPoint, "test1.txt"))
 	require.NoError(t, err, fmt.Sprintf("%s ReadFile: %v", time.Now().Format("15:04:05.0000"), err))
@@ -411,31 +433,46 @@ func TestConnectedToServer(t *testing.T) {
 	})
 
 	t.Run("Truncate", func(t *testing.T) {
-		err := os.Truncate(filepath.Join(mountPoint, "a", "b", "test1.txt"), 0x10000)
+		tcf := make([]byte, 0x1500)
+		copy(tcf, testContents)
+		require.NoError(t, os.WriteFile(filepath.Join(mountPoint, "trunc1.txt"), tcf, 0644))
+		err := os.Truncate(filepath.Join(mountPoint, "trunc1.txt"), 0x1000)
 		require.NoError(t, err)
 
 		// Read from the directory exported by the FTP server
-		test1Exported, err := os.ReadFile(filepath.Join(root, "a", "b", "test1.txt"))
+		test1Exported, err := os.ReadFile(filepath.Join(root, "trunc1.txt"))
 		require.NoError(t, err)
-		assert.True(t, bytes.Equal(testContents[:0x10000], test1Exported))
+		assert.True(t, bytes.Equal(tcf[:0x1000], test1Exported))
+	})
 
+	t.Run("Truncate Open", func(t *testing.T) {
+		tcf := make([]byte, 1500)
+		copy(tcf, testContents)
 		// Open a mounted file, truncate it, then seek to EOF and write some text
-		f, err := os.OpenFile(filepath.Join(mountPoint, "a", "b", "test2.txt"), os.O_CREATE|os.O_WRONLY, 0600)
+		// Write a file to the mounted directory
+		require.NoError(t, os.WriteFile(filepath.Join(mountPoint, "trunc2.txt"), tcf, 0644))
+		f, err := os.OpenFile(filepath.Join(mountPoint, "trunc2.txt"), os.O_CREATE|os.O_WRONLY, 0600)
+		t.Log("OpenFile complete")
 		require.NoError(t, err)
-		require.NoError(t, f.Truncate(0x10000))
+		require.NoError(t, f.Truncate(1000))
+		t.Log("Truncate complete")
 		msg := []byte("hello")
-		_, err = f.Seek(0x10000, 0)
+		_, err = f.Seek(1000, 0)
+		t.Log("Seek complete")
 		require.NoError(t, err)
 		_, err = f.Write(msg)
+		t.Log("Write complete")
 		require.NoError(t, err)
 		require.NoError(t, f.Close())
+		t.Log("Close complete")
 
 		time.Sleep(time.Millisecond)
 		// Check that the text was received by the FTP server
-		test2Exported, err := os.ReadFile(filepath.Join(root, "a", "b", "test2.txt"))
+		test2Exported, err := os.ReadFile(filepath.Join(root, "trunc2.txt"))
 		require.NoError(t, err)
-		copy(testContents[0x10000:], msg)
-		assert.True(t, bytes.Equal(testContents[:0x10005], test2Exported))
+		copy(tcf[1000:], msg)
+		assert.True(t, len(test2Exported) == 1005)
+		assert.True(t, bytes.Equal(tcf[:1005], test2Exported))
 	})
 
 	t.Run("Remove not-empty-dir", func(t *testing.T) {
