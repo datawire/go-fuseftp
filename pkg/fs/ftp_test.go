@@ -170,7 +170,8 @@ func startFUSEHost(t *testing.T, ctx context.Context, port uint16, dir string) (
 	// Start the client
 	dir = filepath.Join(dir, "mount")
 	require.NoError(t, os.Mkdir(dir, 0755))
-	fsh, err := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), remoteDir, time.Second)
+	started := make(chan struct{})
+	fsh, err := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), remoteDir, time.Second, started)
 	require.NoError(t, err)
 	mp := dir
 	if runtime.GOOS == "windows" {
@@ -179,12 +180,17 @@ func startFUSEHost(t *testing.T, ctx context.Context, port uint16, dir string) (
 	}
 	host := NewHost(fsh, mp)
 	host.Start(ctx)
+	select {
+	case <-started:
+		dlog.Info(ctx, "FUSE started")
+	case <-ctx.Done():
+	}
 	return fsh, host, dir
 }
 
 func TestConnectFailure(t *testing.T) {
 	ctx := testContext(t)
-	_, err := NewFTPClient(ctx, netip.MustParseAddrPort("198.51.100.32:21"), "", time.Second)
+	_, err := NewFTPClient(ctx, netip.MustParseAddrPort("198.51.100.32:21"), "", time.Second, nil)
 	require.Error(t, err)
 }
 
@@ -204,7 +210,6 @@ func TestBrokenConnection(t *testing.T) {
 		cancel()
 		host.Stop()
 	}()
-	time.Sleep(2 * time.Second)
 	contents := []byte("Some text\n")
 	require.NoError(t, os.WriteFile(filepath.Join(root, "test1.txt"), contents, 0644))
 
@@ -215,7 +220,6 @@ func TestBrokenConnection(t *testing.T) {
 	// Break the connection (stop the server)
 	serverCancel()
 	wg.Wait()
-	time.Sleep(2 * time.Second)
 
 	broken := func(err error) bool {
 		pe := &fs2.PathError{}
@@ -289,9 +293,6 @@ func TestConnectedToServer(t *testing.T) {
 		testContents[i] = byte(i & 0xff)
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(root, "test1.txt"), testContents, 0644))
-
-	// Wait for things to get set up.
-	time.Sleep(2 * time.Second)
 
 	t.Run("Read", func(t *testing.T) {
 		test1Mounted, err := os.ReadFile(filepath.Join(mountPoint, "test1.txt"))

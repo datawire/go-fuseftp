@@ -65,7 +65,8 @@ func (s *service) Mount(_ context.Context, rq *rpc.MountRequest) (*rpc.MountIden
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
-	fi, err := fs.NewFTPClient(ctx, ap, rq.Directory, rq.ReadTimeout.AsDuration())
+	started := make(chan struct{})
+	fi, err := fs.NewFTPClient(ctx, ap, rq.Directory, rq.ReadTimeout.AsDuration(), started)
 	if err != nil {
 		cancel()
 		return nil, status.Errorf(codes.Internal, err.Error())
@@ -86,6 +87,10 @@ func (s *service) Mount(_ context.Context, rq *rpc.MountRequest) (*rpc.MountIden
 		},
 	}
 	s.nextID++
+	select {
+	case <-started:
+	case <-ctx.Done():
+	}
 	return &rpc.MountIdentifier{Id: id}, nil
 }
 

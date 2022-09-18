@@ -39,6 +39,9 @@ type fuseImpl struct {
 	// cancel the ctx, and hence the GC loop
 	cancel context.CancelFunc
 
+	// started is an optional channel guaranteed to be closed on the first call to Getattr
+	started chan<- struct{}
+
 	// Next file handle. File handles are opaque to FUSE, and much faster to use than
 	// the full path
 	nextHandle uint64
@@ -141,7 +144,7 @@ type FTPClient interface {
 // NewFTPClient returns an implementation of the fuse.FileSystemInterface that is backed by
 // an FTP server connection tp the address. The dir parameter is the directory that the
 // FTP server changes to when connecting.
-func NewFTPClient(ctx context.Context, addr netip.AddrPort, dir string, readTimeout time.Duration) (FTPClient, error) {
+func NewFTPClient(ctx context.Context, addr netip.AddrPort, dir string, readTimeout time.Duration, started chan<- struct{}) (FTPClient, error) {
 	f := &fuseImpl{
 		current: make(map[uint64]*info),
 		infos:   make(map[string]*ftp.Entry),
@@ -149,6 +152,7 @@ func NewFTPClient(ctx context.Context, addr netip.AddrPort, dir string, readTime
 			dir:         dir,
 			readTimeout: readTimeout,
 		},
+		started: started,
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -591,6 +595,12 @@ func (f *fuseImpl) loadHandle(fh uint64) (*info, int) {
 func (f *fuseImpl) openHandle(path string) (*info, int) {
 	f.Lock()
 	defer f.Unlock()
+	if f.started != nil {
+		defer func() {
+			close(f.started)
+			f.started = nil
+		}()
+	}
 	for _, fe := range f.current {
 		if fe.path == path && fe.conn == nil {
 			return fe, 0
