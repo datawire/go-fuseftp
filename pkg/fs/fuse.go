@@ -42,9 +42,9 @@ func (fh *FuseHost) Start(ctx context.Context) {
 		// user as the one that starts the FUSE mount
 		opts = append(opts, "-o", "uid=-1", "-o", "gid=-1")
 	}
-	//	if dlog.MaxLogLevel(ctx) >= dlog.LogLevelDebug {
-	//		opts = append(opts, "-o", "debug")
-	//	}
+	if dlog.MaxLogLevel(ctx) >= dlog.LogLevelDebug {
+		opts = append(opts, "-o", "debug")
+	}
 
 	mCh := make(chan bool, 1)
 	fh.wg.Add(1)
