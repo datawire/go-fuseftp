@@ -7,6 +7,7 @@ require (
 	github.com/datawire/go-ftpserver v0.1.0
 	github.com/datawire/go-fuseftp/rpc v0.2.0
 	github.com/jlaffaye/ftp v0.0.0-20220821212529-0aeb8660a7e2
+	github.com/sirupsen/logrus v1.9.0
 	github.com/stretchr/testify v1.8.0
 	github.com/winfsp/cgofuse v1.5.0
 	google.golang.org/grpc v1.46.2
@@ -22,7 +23,6 @@ require (
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/sirupsen/logrus v1.9.0 // indirect
 	github.com/spf13/afero v1.9.2 // indirect
 	golang.org/x/net v0.0.0-20220517181318-183a9ca12b87 // indirect
 	golang.org/x/sys v0.0.0-20220818161305-2296e01440c6 // indirect

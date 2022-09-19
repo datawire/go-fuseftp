@@ -212,6 +212,7 @@ func TestBrokenConnection(t *testing.T) {
 	}()
 	contents := []byte("Some text\n")
 	require.NoError(t, os.WriteFile(filepath.Join(root, "test1.txt"), contents, 0644))
+	time.Sleep(time.Millisecond)
 
 	test1Mounted, err := os.ReadFile(filepath.Join(mountPoint, "test1.txt"))
 	require.NoError(t, err, fmt.Sprintf("%s ReadFile: %v", time.Now().Format("15:04:05.0000"), err))
@@ -225,10 +226,15 @@ func TestBrokenConnection(t *testing.T) {
 		pe := &fs2.PathError{}
 		if errors.As(err, &pe) {
 			ee := pe.Error()
-			return containsAny(ee, errIO, errBrokenPipe, errConnRefused, errUnexpectedNetworkError)
+			return containsAny(ee, errIO, errBrokenPipe, errConnRefused, errConnAborted, errUnexpectedNetworkError)
 		}
 		return false
 	}
+
+	t.Run("Stat", func(t *testing.T) {
+		_, err := os.Stat(filepath.Join(mountPoint, "somefile.txt"))
+		require.True(t, broken(err))
+	})
 
 	t.Run("Create", func(t *testing.T) {
 		_, err := os.Create(filepath.Join(mountPoint, "somefile.txt"))
@@ -240,8 +246,13 @@ func TestBrokenConnection(t *testing.T) {
 		require.True(t, broken(err))
 	})
 
+	t.Run("Mkdir", func(t *testing.T) {
+		_, err := os.ReadDir(filepath.Join(mountPoint, "x"))
+		require.True(t, broken(err))
+	})
+
 	t.Run("ReadDir", func(t *testing.T) {
-		_, err := os.ReadDir(filepath.Join(mountPoint, "a", "b"))
+		_, err := os.ReadDir(filepath.Join(mountPoint, "a"))
 		require.True(t, broken(err))
 	})
 
@@ -308,6 +319,7 @@ func TestConnectedToServer(t *testing.T) {
 	t.Run("Write", func(t *testing.T) {
 		// Write a file to the mounted directory
 		require.NoError(t, os.WriteFile(filepath.Join(mountPoint, "test2.txt"), testContents, 0644))
+		time.Sleep(time.Millisecond)
 
 		// Read from the directory exported by the FTP server
 		test2Exported, err := os.ReadFile(filepath.Join(root, "test2.txt"))
