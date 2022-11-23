@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - master
+      - testing
   pull_request:
     types:
       - opened
