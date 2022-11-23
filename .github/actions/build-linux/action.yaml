@@ -14,7 +14,7 @@ runs:
       run: |
         sudo rm -f /etc/apt/sources.list.d/google-chrome.list
         sudo apt-get update
-        sudo apt-get install -y libfuse-dev gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+        sudo apt-get install -y libfuse3-dev gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
     - name: Setup go
       uses: actions/setup-go@v3
       with:
