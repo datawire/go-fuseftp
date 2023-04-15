@@ -2,8 +2,10 @@ package fs
 
 import (
 	"context"
+	"os"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/winfsp/cgofuse/fuse"
 
@@ -52,6 +54,10 @@ func (fh *FuseHost) Start(ctx context.Context, started chan error) error {
 	go func() {
 		defer fh.wg.Done()
 		mCh <- fh.host.Mount(fh.mountPoint, opts)
+	}()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_, _ = os.Stat(fh.mountPoint)
 	}()
 
 	fh.wg.Add(1)
