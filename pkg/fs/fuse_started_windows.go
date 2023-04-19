@@ -7,7 +7,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func (fh *FuseHost) detectFuseStarted(ctx context.Context, started chan struct{}) {
+func (fh *FuseHost) detectFuseStarted(ctx context.Context, started chan error) {
 	devPath, err := windows.UTF16PtrFromString(`\\.\` + fh.mountPoint)
 	if err != nil {
 		panic(err)
