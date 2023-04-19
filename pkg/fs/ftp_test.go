@@ -510,16 +510,15 @@ func TestConnectedToServer(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("GC cleans cache", func(t *testing.T) {
-		time.Sleep(2200 * time.Millisecond)
-		require.Equal(t, 0, fsh.(*fuseImpl).cacheSize())
-	})
-
 	t.Run("MkDir file-exists", func(t *testing.T) {
 		err := os.Mkdir(filepath.Join(mountPoint, "a", "test3.txt"), 0755)
 		isFile := &fs2.PathError{}
 		require.ErrorAs(t, err, &isFile)
 		require.Contains(t, isFile.Error(), errFileExists)
+	})
+
+	t.Run("Release", func(t *testing.T) {
+		require.Equal(t, 0, fsh.(*fuseImpl).cacheSize())
 	})
 }
 
