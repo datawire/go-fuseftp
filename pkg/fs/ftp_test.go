@@ -364,6 +364,23 @@ func TestConnectedToServer(t *testing.T) {
 		assert.Equal(t, msg, string(test3Exported))
 	})
 
+	t.Run("CreateTmp", func(t *testing.T) {
+		f, err := os.CreateTemp(mountPoint, "test-*.txt")
+		require.NoError(t, err)
+		name := f.Name()
+		msg := "Hello World\n"
+		n, err := f.WriteString(msg)
+		assert.NoError(t, err)
+		assert.NoError(t, f.Close())
+		assert.Equal(t, len(msg), n)
+		time.Sleep(time.Millisecond)
+
+		// Check that the text was received by the FTP server
+		test3Exported, err := os.ReadFile(filepath.Join(root, filepath.Base(name)))
+		require.NoError(t, err)
+		assert.Equal(t, msg, string(test3Exported))
+	})
+
 	t.Run("Create dir-exists", func(t *testing.T) {
 		_, err := os.Create(filepath.Join(mountPoint, "a", "b"))
 		isDir := &fs2.PathError{}
@@ -541,14 +558,14 @@ func TestManyLargeFiles(t *testing.T) {
 	const fileSize = 100 * 1024 * 1024
 	names := make([]string, fileCount)
 
-	// CDreate files "on the remote server".
+	// Create files "on the remote server".
 	createRemoteWg := &sync.WaitGroup{}
 	createRemoteWg.Add(fileCount)
 	for i := 0; i < fileCount; i++ {
 		go func(i int) {
 			defer createRemoteWg.Done()
 			name, err := createLargeFile(root, fileSize)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			names[i] = name
 			t.Logf("created %s", name)
 		}(i)
@@ -565,7 +582,7 @@ func TestManyLargeFiles(t *testing.T) {
 		go func(name string) {
 			defer readWriteWg.Done()
 			t.Logf("validating %s", name)
-			assert.NoError(t, validateLargeFile(name, fileSize))
+			require.NoError(t, validateLargeFile(name, fileSize))
 		}(filepath.Join(mountPoint, filepath.Base(names[i])))
 	}
 
@@ -574,7 +591,7 @@ func TestManyLargeFiles(t *testing.T) {
 		go func(i int) {
 			defer readWriteWg.Done()
 			name, err := createLargeFile(mountPoint, fileSize)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			localNames[i] = name
 			t.Logf("created %s", name)
 		}(i)
@@ -588,7 +605,7 @@ func TestManyLargeFiles(t *testing.T) {
 		go func(name string) {
 			defer readRemoteWg.Done()
 			t.Logf("validating %s", name)
-			assert.NoError(t, validateLargeFile(name, fileSize))
+			require.NoError(t, validateLargeFile(name, fileSize))
 		}(filepath.Join(root, filepath.Base(localNames[i])))
 	}
 	readRemoteWg.Wait()
