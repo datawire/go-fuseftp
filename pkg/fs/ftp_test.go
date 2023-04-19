@@ -170,8 +170,8 @@ func startFUSEHost(t *testing.T, ctx context.Context, port uint16, dir string) (
 	// Start the client
 	dir = filepath.Join(dir, "mount")
 	require.NoError(t, os.Mkdir(dir, 0755))
-	started := make(chan struct{})
-	fsh, err := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), remoteDir, time.Second, started)
+	started := make(chan error, 1)
+	fsh, err := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), remoteDir, 30*time.Second)
 	require.NoError(t, err)
 	mp := dir
 	if runtime.GOOS == "windows" {
@@ -179,9 +179,10 @@ func startFUSEHost(t *testing.T, ctx context.Context, port uint16, dir string) (
 		dir = mp + `\`
 	}
 	host := NewHost(fsh, mp)
-	host.Start(ctx)
+	host.Start(ctx, started)
 	select {
-	case <-started:
+	case err := <-started:
+		require.NoError(t, err)
 		dlog.Info(ctx, "FUSE started")
 	case <-ctx.Done():
 	}
@@ -190,7 +191,7 @@ func startFUSEHost(t *testing.T, ctx context.Context, port uint16, dir string) (
 
 func TestConnectFailure(t *testing.T) {
 	ctx := testContext(t)
-	_, err := NewFTPClient(ctx, netip.MustParseAddrPort("198.51.100.32:21"), "", time.Second, nil)
+	_, err := NewFTPClient(ctx, netip.MustParseAddrPort("198.51.100.32:21"), "", time.Second)
 	require.Error(t, err)
 }
 
@@ -449,8 +450,7 @@ func TestConnectedToServer(t *testing.T) {
 		tcf := make([]byte, 0x1500)
 		copy(tcf, testContents)
 		require.NoError(t, os.WriteFile(filepath.Join(mountPoint, "trunc1.txt"), tcf, 0644))
-		err := os.Truncate(filepath.Join(mountPoint, "trunc1.txt"), 0x1000)
-		require.NoError(t, err)
+		require.NoError(t, os.Truncate(filepath.Join(mountPoint, "trunc1.txt"), 0x1000))
 
 		// Read from the directory exported by the FTP server
 		test1Exported, err := os.ReadFile(filepath.Join(root, "trunc1.txt"))

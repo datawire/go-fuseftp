@@ -39,8 +39,8 @@ type fuseImpl struct {
 	// cancel the ctx, and hence the GC loop
 	cancel context.CancelFunc
 
-	// started is an optional channel guaranteed to be closed on the first call to Getattr
-	started chan<- struct{}
+	// Mutex protects nextHandle and current
+	sync.RWMutex
 
 	// Next file handle. File handles are opaque to FUSE, and much faster to use than
 	// the full path
@@ -144,7 +144,7 @@ type FTPClient interface {
 // NewFTPClient returns an implementation of the fuse.FileSystemInterface that is backed by
 // an FTP server connection tp the address. The dir parameter is the directory that the
 // FTP server changes to when connecting.
-func NewFTPClient(ctx context.Context, addr netip.AddrPort, dir string, readTimeout time.Duration, started chan<- struct{}) (FTPClient, error) {
+func NewFTPClient(ctx context.Context, addr netip.AddrPort, dir string, readTimeout time.Duration) (FTPClient, error) {
 	f := &fuseImpl{
 		current: make(map[uint64]*info),
 		infos:   make(map[string]*ftp.Entry),
@@ -152,7 +152,6 @@ func NewFTPClient(ctx context.Context, addr netip.AddrPort, dir string, readTime
 			dir:         dir,
 			readTimeout: readTimeout,
 		},
-		started: started,
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -592,60 +591,7 @@ func (f *fuseImpl) loadHandle(fh uint64) (*info, int) {
 	return fe, 0
 }
 
-func (f *fuseImpl) openHandle(path string) (*info, int) {
-	f.Lock()
-	defer f.Unlock()
-	if f.started != nil {
-		defer func() {
-			close(f.started)
-			f.started = nil
-		}()
-	}
-	for _, fe := range f.current {
-		if fe.path == path && fe.conn == nil {
-			return fe, 0
-		}
-	}
-
-	conn, err := f.pool.get(f.ctx)
-	if err != nil {
-		return nil, f.errToFuseErr(err)
-	}
-	defer f.pool.put(f.ctx, conn)
-
-	if err = f.getEntry(path, conn); err != nil {
-		return nil, f.errToFuseErr(err)
-	}
-	nfe := &info{
-		fuseImpl: f,
-		path:     path,
-		fh:       f.nextHandle,
-	}
-	f.current[f.nextHandle] = nfe
-	f.nextHandle++
-	return nfe, 0
-}
-
-func (f *fuseImpl) getEntry(path string, conn *ftp.ServerConn) error {
-	var ok bool
-	if _, ok = f.infos[path]; ok {
-		return nil
-	}
-	return f.refreshEntry(path, conn)
-}
-
-func (f *fuseImpl) refreshEntry(path string, conn *ftp.ServerConn) error {
-	e, err := conn.GetEntry(relpath(path))
-	if err != nil {
-		return err
-	}
-	f.infos[path] = e
-	return nil
-}
-
-func (f *fuseImpl) openDedicatedHandle(path string, create, append bool) (nfe *info, e *ftp.Entry, errCode int) {
-	f.Lock()
-	defer f.Unlock()
+func (f *fuseImpl) openHandle(path string, create, append bool) (nfe *info, e *ftp.Entry, errCode int) {
 	conn, err := f.pool.get(f.ctx)
 	if err != nil {
 		return nil, nil, f.errToFuseErr(err)

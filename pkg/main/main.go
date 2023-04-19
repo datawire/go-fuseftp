@@ -65,14 +65,14 @@ func (s *service) Mount(_ context.Context, rq *rpc.MountRequest) (*rpc.MountIden
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
-	started := make(chan struct{})
-	fi, err := fs.NewFTPClient(ctx, ap, rq.Directory, rq.ReadTimeout.AsDuration(), started)
+	started := make(chan error, 1)
+	fi, err := fs.NewFTPClient(ctx, ap, rq.Directory, rq.ReadTimeout.AsDuration())
 	if err != nil {
 		cancel()
 		return nil, status.Errorf(codes.Internal, err.Error())
 	}
 	host := fs.NewHost(fi, rq.MountPoint)
-	host.Start(ctx)
+	host.Start(ctx, started)
 
 	id := s.nextID
 	s.mounts[id] = &mount{
@@ -88,7 +88,11 @@ func (s *service) Mount(_ context.Context, rq *rpc.MountRequest) (*rpc.MountIden
 	}
 	s.nextID++
 	select {
-	case <-started:
+	case err := <-started:
+		if err != nil {
+			// Failed to open mountPoint
+			return nil, status.Errorf(codes.InvalidArgument, err.Error())
+		}
 	case <-ctx.Done():
 	}
 	return &rpc.MountIdentifier{Id: id}, nil
