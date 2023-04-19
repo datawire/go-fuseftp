@@ -109,8 +109,8 @@ func NewFTPClient(ctx context.Context, addr netip.AddrPort, dir string, readTime
 	f := &fuseImpl{
 		current: make(map[uint64]*info),
 		pool: connPool{
-			dir:         dir,
-			readTimeout: readTimeout,
+			dir:     dir,
+			timeout: readTimeout,
 		},
 	}
 
@@ -275,11 +275,6 @@ func (f *fuseImpl) Read(path string, buff []byte, ofst int64, fh uint64) int {
 	bytesRead := 0
 	bytesToRead := len(buff)
 	for bytesToRead-bytesRead > 0 {
-		if f.pool.readTimeout != 0 {
-			if err := fe.rr.SetDeadline(time.Now().Add(f.pool.readTimeout)); err != nil {
-				return f.errToFuseErr(err)
-			}
-		}
 		n, err := fe.rr.Read(buff[bytesRead:])
 		bytesRead += n
 		if err != nil {

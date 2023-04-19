@@ -2,6 +2,7 @@ package fs
 
 import (
 	"context"
+	"net"
 	"net/netip"
 	"sync"
 	"time"
@@ -14,6 +15,25 @@ import (
 type connList struct {
 	conn *ftp.ServerConn
 	next *connList
+}
+
+type timedConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (t timedConn) Read(b []byte) (n int, err error) {
+	if err := t.SetReadDeadline(time.Now().Add(t.timeout)); err != nil {
+		return 0, err
+	}
+	return t.Conn.Read(b)
+}
+
+func (t timedConn) Write(b []byte) (n int, err error) {
+	if err := t.SetWriteDeadline(time.Now().Add(t.timeout)); err != nil {
+		return 0, err
+	}
+	return t.Conn.Write(b)
 }
 
 func (cl *connList) conns() []*ftp.ServerConn {
@@ -40,11 +60,11 @@ func (cl *connList) size() int {
 
 type connPool struct {
 	sync.Mutex
-	addr        netip.AddrPort
-	dir         string
-	readTimeout time.Duration
-	idleList    *connList
-	busyList    *connList
+	addr     netip.AddrPort
+	dir      string
+	timeout  time.Duration
+	idleList *connList
+	busyList *connList
 }
 
 // connect returns a new connection without using the pool. Use get instead of connect.
@@ -52,8 +72,17 @@ func (p *connPool) connect(ctx context.Context) (*ftp.ServerConn, error) {
 	opts := []ftp.DialOption{
 		ftp.DialWithContext(ctx),
 	}
-	if p.readTimeout > 0 {
-		opts = append(opts, ftp.DialWithTimeout(p.readTimeout))
+	if p.timeout > 0 {
+		opts = append(opts,
+			ftp.DialWithTimeout(p.timeout),
+			ftp.DialWithShutTimeout(p.timeout),
+			ftp.DialWithDialFunc(func(network, address string) (net.Conn, error) {
+				conn, err := net.DialTimeout(network, address, p.timeout)
+				if err != nil {
+					return nil, err
+				}
+				return &timedConn{Conn: conn, timeout: p.timeout}, nil
+			}))
 	}
 	conn, err := ftp.Dial(p.addr.String(), opts...)
 	if err != nil {
