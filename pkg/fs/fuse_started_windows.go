@@ -2,6 +2,8 @@ package fs
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -20,6 +22,11 @@ func (fh *FuseHost) detectFuseStarted(ctx context.Context, started chan error) {
 	for {
 		select {
 		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				started <- fmt.Errorf("timeout trying to read mount point %q", fh.mountPoint)
+			} else {
+				started <- ctx.Err()
+			}
 			return
 		case <-ticker.C:
 			fh, err := windows.CreateFile(devPath,

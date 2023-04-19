@@ -173,7 +173,6 @@ func startFUSEHost(t *testing.T, ctx context.Context, port uint16, dir string) (
 	// Start the client
 	dir = filepath.Join(dir, "mount")
 	require.NoError(t, os.Mkdir(dir, 0755))
-	started := make(chan error, 1)
 	fsh, err := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), remoteDir, 30*time.Second)
 	require.NoError(t, err)
 	mp := dir
@@ -182,13 +181,7 @@ func startFUSEHost(t *testing.T, ctx context.Context, port uint16, dir string) (
 		dir = mp + `\`
 	}
 	host := NewHost(fsh, mp)
-	host.Start(ctx, started)
-	select {
-	case err := <-started:
-		require.NoError(t, err)
-		dlog.Info(ctx, "FUSE started")
-	case <-ctx.Done():
-	}
+	require.NoError(t, host.Start(ctx, 5*time.Second))
 	return fsh, host, dir
 }
 
