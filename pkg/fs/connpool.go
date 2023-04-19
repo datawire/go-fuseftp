@@ -2,7 +2,9 @@ package fs
 
 import (
 	"context"
+	"net"
 	"net/netip"
+	"sync"
 	"time"
 
 	"github.com/jlaffaye/ftp"
@@ -15,13 +17,37 @@ type connList struct {
 	next *connList
 }
 
-// quit calls the Quit method on all connections and empties the pool
-func (cl *connList) quit(ctx context.Context, silent bool) {
-	for c := cl; c != nil; c = c.next {
-		if err := c.conn.Quit(); err != nil && !silent {
-			dlog.Errorf(ctx, "quit failed: %v", err)
-		}
+type timedConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (t timedConn) Read(b []byte) (n int, err error) {
+	if err := t.SetReadDeadline(time.Now().Add(t.timeout)); err != nil {
+		return 0, err
 	}
+	return t.Conn.Read(b)
+}
+
+func (t timedConn) Write(b []byte) (n int, err error) {
+	if err := t.SetWriteDeadline(time.Now().Add(t.timeout)); err != nil {
+		return 0, err
+	}
+	return t.Conn.Write(b)
+}
+
+func (cl *connList) conns() []*ftp.ServerConn {
+	sz := cl.size()
+	if sz == 0 {
+		return nil
+	}
+	cs := make([]*ftp.ServerConn, sz)
+	i := 0
+	for c := cl; c != nil; c = c.next {
+		cs[i] = c.conn
+		i++
+	}
+	return cs
 }
 
 func (cl *connList) size() int {
@@ -33,11 +59,12 @@ func (cl *connList) size() int {
 }
 
 type connPool struct {
-	addr        netip.AddrPort
-	dir         string
-	readTimeout time.Duration
-	idleList    *connList
-	busyList    *connList
+	sync.Mutex
+	addr     netip.AddrPort
+	dir      string
+	timeout  time.Duration
+	idleList *connList
+	busyList *connList
 }
 
 // connect returns a new connection without using the pool. Use get instead of connect.
@@ -45,8 +72,17 @@ func (p *connPool) connect(ctx context.Context) (*ftp.ServerConn, error) {
 	opts := []ftp.DialOption{
 		ftp.DialWithContext(ctx),
 	}
-	if p.readTimeout > 0 {
-		opts = append(opts, ftp.DialWithTimeout(p.readTimeout))
+	if p.timeout > 0 {
+		opts = append(opts,
+			ftp.DialWithTimeout(p.timeout),
+			ftp.DialWithShutTimeout(p.timeout),
+			ftp.DialWithDialFunc(func(network, address string) (net.Conn, error) {
+				conn, err := net.DialTimeout(network, address, p.timeout)
+				if err != nil {
+					return nil, err
+				}
+				return &timedConn{Conn: conn, timeout: p.timeout}, nil
+			}))
 	}
 	conn, err := ftp.Dial(p.addr.String(), opts...)
 	if err != nil {
@@ -61,48 +97,59 @@ func (p *connPool) connect(ctx context.Context) (*ftp.ServerConn, error) {
 		}
 	}
 	// and add first in busyList
+	p.Lock()
 	cl := &connList{
 		conn: conn,
 		next: p.busyList,
 	}
 	p.busyList = cl
+	p.Unlock()
 	return conn, nil
 }
 
 // get returns a connection from the pool, or creates a new connection if needed
 func (p *connPool) get(ctx context.Context) (conn *ftp.ServerConn, err error) {
+	p.Lock()
 	if idle := p.idleList; idle != nil {
 		p.idleList = idle.next
 		idle.next = p.busyList
 		p.busyList = idle
 		conn = idle.conn
 	}
+	p.Unlock()
 	if conn == nil {
 		conn, err = p.connect(ctx)
 	}
-	p.logSz(ctx, "get")
 	return
-}
-
-func (p *connPool) logSz(ctx context.Context, pfx string) {
-	iz := p.idleList.size()
-	dlog.Debugf(ctx, "%s: pooled %d, open %d", pfx, iz, iz+p.busyList.size())
 }
 
 // setAddr will call Quit on all open connections, both busy and idle, change
 // the address, reconnect one connection, and put it in the idle list.
 func (p *connPool) setAddr(ctx context.Context, addr netip.AddrPort) error {
-	if p.addr == addr {
+	var idle []*ftp.ServerConn
+	var busy []*ftp.ServerConn
+	p.Lock()
+	eq := p.addr == addr
+	if !eq {
+		idle = p.idleList.conns()
+		busy = p.busyList.conns()
+		p.idleList = nil
+		p.busyList = nil
+		p.addr = addr
+	}
+	p.Unlock()
+	if eq {
 		return nil
 	}
-	p.doQuit(ctx, true) // attempt to clear current connections, but ignore errors
-	p.addr = addr
+	closeList(ctx, idle, true)
+	closeList(ctx, busy, true)
 
 	// Create the first connection up front, so that a failure to connect to the server is caught early
 	conn, err := p.connect(ctx)
 	if err != nil {
 		return err
 	}
+	// return the connection to the pool
 	p.put(ctx, conn)
 	return nil
 }
@@ -110,6 +157,7 @@ func (p *connPool) setAddr(ctx context.Context, addr netip.AddrPort) error {
 // put returns a connection to the pool
 func (p *connPool) put(ctx context.Context, conn *ftp.ServerConn) {
 	// remove from busyList
+	p.Lock()
 	removed := false
 	var prev *connList
 	for c := p.busyList; c != nil; c = c.next {
@@ -135,48 +183,45 @@ func (p *connPool) put(ctx context.Context, conn *ftp.ServerConn) {
 			next: p.idleList,
 		}
 		p.idleList = cl
-		p.logSz(ctx, "put")
+	}
+	p.Unlock()
+}
+
+func closeList(ctx context.Context, conns []*ftp.ServerConn, silent bool) {
+	for _, c := range conns {
+		if err := c.Quit(); err != nil && !silent {
+			dlog.Errorf(ctx, "quit failed: %v", err)
+		}
 	}
 }
 
 // quit calls the Quit method on all connections and empties the pool
-func (p *connPool) doQuit(ctx context.Context, silent bool) {
-	p.idleList.quit(ctx, silent)
-	p.busyList.quit(ctx, silent)
+func (p *connPool) quit(ctx context.Context) {
+	p.Lock()
+	idle := p.idleList.conns()
+	busy := p.idleList.conns()
 	p.idleList = nil
 	p.busyList = nil
-}
-
-// quit calls the Quit method on all connections and empties the pool
-func (p *connPool) quit(ctx context.Context) {
-	p.doQuit(ctx, false)
+	p.Unlock()
+	closeList(ctx, idle, false)
+	closeList(ctx, busy, false)
 }
 
 // tidy will attempt to shrink the number of open connections to two, but since it
 // only closes connections that are idle at the time the call is made, there
 // might still be more than 2 connections after the call returns.
 func (p *connPool) tidy(ctx context.Context) {
-	iz := p.idleList.size()
-	bz := p.busyList.size()
-	sz := iz + bz
-	for idle := p.idleList; idle != nil && sz > 2; idle = idle.next {
-		p.idleList = idle.next
-		if err := idle.conn.Quit(); err != nil {
-			dlog.Errorf(ctx, "quit failed: %v", err)
+	p.Lock()
+	idle := p.idleList.conns()
+	idleCount := 64 - p.busyList.size()
+	var cl []*ftp.ServerConn
+	if idleCount > 0 && len(idle) > idleCount {
+		cl = idle[idleCount:]
+		p.idleList = nil
+		for _, c := range idle[:idleCount] {
+			p.idleList = &connList{conn: c, next: p.idleList}
 		}
-		sz--
 	}
-	var prev *connList
-	for idle := p.idleList; idle != nil; idle = idle.next {
-		if err := idle.conn.NoOp(); err != nil {
-			if prev == nil {
-				p.idleList = idle.next
-			} else {
-				prev.next = idle.next
-			}
-			dlog.Errorf(ctx, "NoOp failed, dropping connection to %s: %v", p.addr, err)
-			_ = idle.conn.Quit()
-		}
-		prev = idle
-	}
+	p.Unlock()
+	closeList(ctx, cl, false)
 }

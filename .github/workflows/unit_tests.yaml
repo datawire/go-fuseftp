@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - master
+      - testing
   pull_request:
     types:
       - opened
@@ -14,9 +15,9 @@ jobs:
       - name: Run build
         uses: ./.github/actions/build-linux
         with:
-          go-version: 1.19
+          go-version: '1.20'
       - name: Run lint
-        uses: golangci/golangci-lint-action@v3
+        run: make lint
       - name: Update /etc/fuse.conf
         run: sudo sh -c 'echo user_allow_other >> /etc/fuse.conf'
       - name: Run tests
@@ -35,7 +36,7 @@ jobs:
       - name: Run build
         uses: ./.github/actions/build-macos
         with:
-          go-version: 1.19
+          go-version: '1.20'
       - name: Run tests
         # We are not currently running the tests on macOS because the brew install doesn't
         # fix the Kext-Loading. The tests must remain disabled until GitHub provides a macOS
@@ -51,7 +52,7 @@ jobs:
       - name: Run build
         uses: ./.github/actions/build-windows
         with:
-          go-version: 1.19
+          go-version: '1.20'
       - name: Run tests
         shell: bash
         run: CGO_ENABLED=0 go test ./...

@@ -2,7 +2,7 @@ name: Build fuseftp on Linux
 description: Builds the fuseftp binary on Linux amd64 and arm64
 inputs:
   go-version:
-    description: Version of the go distro, e.g. 1.19
+    description: Version of the go distro, e.g. 1.20
     required: true
   upload:
     default: false

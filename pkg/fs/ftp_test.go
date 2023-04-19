@@ -1,12 +1,15 @@
 package fs
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	fs2 "io/fs"
 	"log"
+	"math"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -122,7 +125,7 @@ func (w *tbWrapper) UnformattedLogln(level dlog.LogLevel, args ...any) {
 
 func testContext(t *testing.T) context.Context {
 	lr := logrus.New()
-	lr.Level = logrus.DebugLevel
+	lr.Level = logrus.InfoLevel
 	lr.SetFormatter(&logrus.TextFormatter{
 		ForceColors:               false,
 		DisableColors:             true,
@@ -170,8 +173,8 @@ func startFUSEHost(t *testing.T, ctx context.Context, port uint16, dir string) (
 	// Start the client
 	dir = filepath.Join(dir, "mount")
 	require.NoError(t, os.Mkdir(dir, 0755))
-	started := make(chan struct{})
-	fsh, err := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), remoteDir, time.Second, started)
+	started := make(chan error, 1)
+	fsh, err := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), remoteDir, 30*time.Second)
 	require.NoError(t, err)
 	mp := dir
 	if runtime.GOOS == "windows" {
@@ -179,9 +182,10 @@ func startFUSEHost(t *testing.T, ctx context.Context, port uint16, dir string) (
 		dir = mp + `\`
 	}
 	host := NewHost(fsh, mp)
-	host.Start(ctx)
+	host.Start(ctx, started)
 	select {
-	case <-started:
+	case err := <-started:
+		require.NoError(t, err)
 		dlog.Info(ctx, "FUSE started")
 	case <-ctx.Done():
 	}
@@ -190,7 +194,7 @@ func startFUSEHost(t *testing.T, ctx context.Context, port uint16, dir string) (
 
 func TestConnectFailure(t *testing.T) {
 	ctx := testContext(t)
-	_, err := NewFTPClient(ctx, netip.MustParseAddrPort("198.51.100.32:21"), "", time.Second, nil)
+	_, err := NewFTPClient(ctx, netip.MustParseAddrPort("198.51.100.32:21"), "", time.Second)
 	require.Error(t, err)
 }
 
@@ -360,6 +364,23 @@ func TestConnectedToServer(t *testing.T) {
 		assert.Equal(t, msg, string(test3Exported))
 	})
 
+	t.Run("CreateTmp", func(t *testing.T) {
+		f, err := os.CreateTemp(mountPoint, "test-*.txt")
+		require.NoError(t, err)
+		name := f.Name()
+		msg := "Hello World\n"
+		n, err := f.WriteString(msg)
+		assert.NoError(t, err)
+		assert.NoError(t, f.Close())
+		assert.Equal(t, len(msg), n)
+		time.Sleep(time.Millisecond)
+
+		// Check that the text was received by the FTP server
+		test3Exported, err := os.ReadFile(filepath.Join(root, filepath.Base(name)))
+		require.NoError(t, err)
+		assert.Equal(t, msg, string(test3Exported))
+	})
+
 	t.Run("Create dir-exists", func(t *testing.T) {
 		_, err := os.Create(filepath.Join(mountPoint, "a", "b"))
 		isDir := &fs2.PathError{}
@@ -449,8 +470,7 @@ func TestConnectedToServer(t *testing.T) {
 		tcf := make([]byte, 0x1500)
 		copy(tcf, testContents)
 		require.NoError(t, os.WriteFile(filepath.Join(mountPoint, "trunc1.txt"), tcf, 0644))
-		err := os.Truncate(filepath.Join(mountPoint, "trunc1.txt"), 0x1000)
-		require.NoError(t, err)
+		require.NoError(t, os.Truncate(filepath.Join(mountPoint, "trunc1.txt"), 0x1000))
 
 		// Read from the directory exported by the FTP server
 		test1Exported, err := os.ReadFile(filepath.Join(root, "trunc1.txt"))
@@ -507,15 +527,151 @@ func TestConnectedToServer(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("GC cleans cache", func(t *testing.T) {
-		time.Sleep(2200 * time.Millisecond)
-		require.Equal(t, 0, fsh.(*fuseImpl).cacheSize())
-	})
-
 	t.Run("MkDir file-exists", func(t *testing.T) {
 		err := os.Mkdir(filepath.Join(mountPoint, "a", "test3.txt"), 0755)
 		isFile := &fs2.PathError{}
 		require.ErrorAs(t, err, &isFile)
 		require.Contains(t, isFile.Error(), errFileExists)
 	})
+
+	t.Run("Release", func(t *testing.T) {
+		require.Equal(t, 0, fsh.(*fuseImpl).cacheSize())
+	})
+}
+
+func TestManyLargeFiles(t *testing.T) {
+	ctx, cancel := context.WithCancel(testContext(t))
+
+	wg := sync.WaitGroup{}
+	tmp := t.TempDir()
+	root, port := startFTPServer(t, ctx, tmp, &wg)
+	require.NotEqual(t, uint16(0), port)
+
+	_, host, mountPoint := startFUSEHost(t, ctx, port, tmp)
+	t.Cleanup(func() {
+		host.Stop()
+		cancel()
+		wg.Wait()
+	})
+
+	const fileCount = 20
+	const fileSize = 100 * 1024 * 1024
+	names := make([]string, fileCount)
+
+	// Create files "on the remote server".
+	createRemoteWg := &sync.WaitGroup{}
+	createRemoteWg.Add(fileCount)
+	for i := 0; i < fileCount; i++ {
+		go func(i int) {
+			defer createRemoteWg.Done()
+			name, err := createLargeFile(root, fileSize)
+			require.NoError(t, err)
+			names[i] = name
+			t.Logf("created %s", name)
+		}(i)
+	}
+	createRemoteWg.Wait()
+	if t.Failed() {
+		t.Fatal("failed attempting to create large files")
+	}
+
+	// Using the local filesystem, read the remote files while writing new ones. All in parallel.
+	readWriteWg := &sync.WaitGroup{}
+	readWriteWg.Add(fileCount * 2)
+	for i := 0; i < fileCount; i++ {
+		go func(name string) {
+			defer readWriteWg.Done()
+			t.Logf("validating %s", name)
+			require.NoError(t, validateLargeFile(name, fileSize))
+		}(filepath.Join(mountPoint, filepath.Base(names[i])))
+	}
+
+	localNames := make([]string, fileCount)
+	for i := 0; i < fileCount; i++ {
+		go func(i int) {
+			defer readWriteWg.Done()
+			name, err := createLargeFile(mountPoint, fileSize)
+			require.NoError(t, err)
+			localNames[i] = name
+			t.Logf("created %s", name)
+		}(i)
+	}
+	readWriteWg.Wait()
+
+	// Read files "on the remote server" and validate them.
+	readRemoteWg := &sync.WaitGroup{}
+	readRemoteWg.Add(fileCount)
+	for i := 0; i < fileCount; i++ {
+		go func(name string) {
+			defer readRemoteWg.Done()
+			t.Logf("validating %s", name)
+			require.NoError(t, validateLargeFile(name, fileSize))
+		}(filepath.Join(root, filepath.Base(localNames[i])))
+	}
+	readRemoteWg.Wait()
+}
+
+func createLargeFile(dir string, sz int) (string, error) {
+	if sz%4 != 0 {
+		return "", errors.New("size%4 must be zero")
+	}
+	qsz := sz / 4 // We'll write a sequence of uint32 values
+	if qsz > math.MaxUint32 {
+		return "", fmt.Errorf("size must be less than %d", math.MaxUint32*4)
+	}
+	f, err := os.CreateTemp(dir, "big-*.bin")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	bf := bufio.NewWriter(f)
+
+	qz := uint32(qsz)
+	buf := make([]byte, 4)
+	for i := uint32(0); i < qz; i++ {
+		binary.BigEndian.PutUint32(buf, i)
+		n, err := bf.Write(buf)
+		if err != nil {
+			return "", err
+		}
+		if n != 4 {
+			return "", errors.New("didn't write quartet")
+		}
+	}
+	if err := bf.Flush(); err != nil {
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+func validateLargeFile(name string, sz int) error {
+	f, err := os.Open(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if st.Size() != int64(sz) {
+		return fmt.Errorf("file size differ. Expected %d, got %d", sz, st.Size())
+	}
+	bf := bufio.NewReader(f)
+	qz := uint32(sz / 4)
+	buf := make([]byte, 4)
+	for i := uint32(0); i < qz; i++ {
+		n, err := bf.Read(buf)
+		if err != nil {
+			return err
+		}
+		if n != 4 {
+			return errors.New("didn't read quartet")
+		}
+		x := binary.BigEndian.Uint32(buf)
+		if i != x {
+			return fmt.Errorf("content differ at position %d: expected %d, got %d", i*4, i, x)
+		}
+	}
+	return nil
 }
