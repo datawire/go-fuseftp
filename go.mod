@@ -32,5 +32,3 @@ require (
 )
 
 replace github.com/datawire/go-fuseftp/rpc => ./rpc
-
-replace github.com/datawire/go-ftpserver => ../go-ftpserver

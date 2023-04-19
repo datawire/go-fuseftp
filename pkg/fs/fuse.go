@@ -29,7 +29,7 @@ func NewHost(fsh fuse.FileSystemInterface, mountPoint string) *FuseHost {
 }
 
 // Start will mount the filesystem on the mountPoint passed to NewHost.
-func (fh *FuseHost) Start(ctx context.Context, started chan error) error {
+func (fh *FuseHost) Start(ctx context.Context, started chan error) {
 	ctx, cancel := context.WithCancel(ctx)
 	fh.cancel = cancel
 
@@ -72,7 +72,6 @@ func (fh *FuseHost) Start(ctx context.Context, started chan error) error {
 			}
 		}
 	}()
-	return nil
 }
 
 // Stop will unmount the file system and terminate the FTP client, wait for all clean-up to

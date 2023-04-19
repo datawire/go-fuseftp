@@ -10,7 +10,7 @@ import (
 func (fh *FuseHost) detectFuseStarted(ctx context.Context, started chan struct{}) {
 	devPath, err := windows.UTF16PtrFromString(`\\.\` + fh.mountPoint)
 	if err != nil {
-		return err
+		panic(err)
 	}
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer func() {
