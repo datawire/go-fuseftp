@@ -12,7 +12,7 @@ runs:
     - name: Download winfsp
       shell: bash
       run: |
-        curl -L -o winfsp.msi https://github.com/winfsp/winfsp/releases/download/v1.11/winfsp-1.11.22176.msi
+        curl -L -o winfsp.msi https://github.com/winfsp/winfsp/releases/download/v2.0/winfsp-2.0.23075.msi
     - name: Install winfsp
       shell: powershell
       run: |
