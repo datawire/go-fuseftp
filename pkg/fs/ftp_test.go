@@ -185,7 +185,7 @@ func startFTPServer(t *testing.T, ctx context.Context, dir string, wg *sync.Wait
 		defer wg.Done()
 		err := cmd.Wait()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, err.Error())
+			fmt.Fprintln(os.Stderr, err.Error())
 		}
 	}()
 	time.Sleep(100 * time.Millisecond)
