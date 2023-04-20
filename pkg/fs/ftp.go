@@ -488,7 +488,10 @@ func (f *fuseImpl) errToFuseErr(err error) int {
 	switch {
 	case strings.HasPrefix(em, fmt.Sprintf("%d ", ftp.StatusCommandOK)):
 		return 0
-	case strings.HasPrefix(em, fmt.Sprintf("%d ", ftp.StatusClosingDataConnection)), strings.Contains(em, errConnAborted):
+	case
+		strings.HasPrefix(em, fmt.Sprintf("%d ", ftp.StatusClosingDataConnection)),
+		strings.Contains(em, errConnAborted),
+		strings.Contains(em, errClosed):
 		return -fuse.ECONNABORTED
 	case containsAny(em, fs.ErrNotExist.Error(), errFileNotFound, errDirNotFound):
 		return -fuse.ENOENT

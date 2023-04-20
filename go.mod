@@ -4,7 +4,7 @@ go 1.20
 
 require (
 	github.com/datawire/dlib v1.3.1-0.20220715022530-b09ab2e017e1
-	github.com/datawire/go-ftpserver v0.1.2
+	github.com/datawire/go-ftpserver v0.1.3
 	github.com/datawire/go-fuseftp/rpc v0.2.0
 	github.com/jlaffaye/ftp v0.1.0
 	github.com/sirupsen/logrus v1.9.0
