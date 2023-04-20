@@ -11,6 +11,8 @@ import (
 	"log"
 	"math"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -23,13 +25,23 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/datawire/dlib/dlog"
 	server "github.com/datawire/go-ftpserver"
 )
+
+func TestMain(m *testing.M) {
+	go func() {
+		port := 6060
+		if os.Getenv("TEST_CALLED_FROM_TEST") == "1" {
+			port = 6061
+		}
+		log.Println(http.ListenAndServe(fmt.Sprintf("localhost:%d", port), nil))
+	}()
+	m.Run()
+}
 
 type tbWrapper struct {
 	testing.TB
@@ -225,7 +237,7 @@ func startFUSEHost(t *testing.T, ctx context.Context, port uint16, dir string) (
 	// Start the client
 	dir = filepath.Join(dir, "mount")
 	require.NoError(t, os.Mkdir(dir, 0755))
-	fsh, err := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), remoteDir, 30*time.Second)
+	fsh, err := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), remoteDir, 60*time.Second)
 	require.NoError(t, err)
 	mp := dir
 	if runtime.GOOS == "windows" {
@@ -597,14 +609,13 @@ func TestManyLargeFiles(t *testing.T) {
 		wg.Wait()
 	})
 
-	const fileCount = 20
 	const fileSize = 100 * 1024 * 1024
-	names := make([]string, fileCount)
+	names := make([]string, manyLargeFilesCount)
 
 	// Create files "on the remote server".
 	createRemoteWg := &sync.WaitGroup{}
-	createRemoteWg.Add(fileCount)
-	for i := 0; i < fileCount; i++ {
+	createRemoteWg.Add(manyLargeFilesCount)
+	for i := 0; i < manyLargeFilesCount; i++ {
 		go func(i int) {
 			defer createRemoteWg.Done()
 			name, err := createLargeFile(root, fileSize)
@@ -620,8 +631,8 @@ func TestManyLargeFiles(t *testing.T) {
 
 	// Using the local filesystem, read the remote files while writing new ones. All in parallel.
 	readWriteWg := &sync.WaitGroup{}
-	readWriteWg.Add(fileCount * 2)
-	for i := 0; i < fileCount; i++ {
+	readWriteWg.Add(manyLargeFilesCount * 2)
+	for i := 0; i < manyLargeFilesCount; i++ {
 		go func(name string) {
 			defer readWriteWg.Done()
 			t.Logf("validating %s", name)
@@ -629,8 +640,8 @@ func TestManyLargeFiles(t *testing.T) {
 		}(filepath.Join(mountPoint, filepath.Base(names[i])))
 	}
 
-	localNames := make([]string, fileCount)
-	for i := 0; i < fileCount; i++ {
+	localNames := make([]string, manyLargeFilesCount)
+	for i := 0; i < manyLargeFilesCount; i++ {
 		go func(i int) {
 			defer readWriteWg.Done()
 			name, err := createLargeFile(mountPoint, fileSize)
@@ -643,8 +654,8 @@ func TestManyLargeFiles(t *testing.T) {
 
 	// Read files "on the remote server" and validate them.
 	readRemoteWg := &sync.WaitGroup{}
-	readRemoteWg.Add(fileCount)
-	for i := 0; i < fileCount; i++ {
+	readRemoteWg.Add(manyLargeFilesCount)
+	for i := 0; i < manyLargeFilesCount; i++ {
 		go func(name string) {
 			defer readRemoteWg.Done()
 			t.Logf("validating %s", name)
