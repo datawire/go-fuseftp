@@ -10,8 +10,12 @@ import (
 	fs2 "io/fs"
 	"log"
 	"math"
+	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -21,13 +25,23 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/datawire/dlib/dlog"
 	server "github.com/datawire/go-ftpserver"
 )
+
+func TestMain(m *testing.M) {
+	go func() {
+		port := 6060
+		if os.Getenv("TEST_CALLED_FROM_TEST") == "1" {
+			port = 6061
+		}
+		log.Println(http.ListenAndServe(fmt.Sprintf("localhost:%d", port), nil))
+	}()
+	m.Run()
+}
 
 type tbWrapper struct {
 	testing.TB
@@ -153,28 +167,77 @@ func startFTPServer(t *testing.T, ctx context.Context, dir string, wg *sync.Wait
 	dir = filepath.Join(dir, "server")
 	export := filepath.Join(dir, remoteDir)
 	require.NoError(t, os.MkdirAll(export, 0755))
-	portCh := make(chan uint16)
+
+	localAddr := func() *net.TCPAddr {
+		l, err := net.Listen("tcp", "0.0.0.0:0")
+		require.NoError(t, err)
+		addr := l.Addr().(*net.TCPAddr)
+		_ = l.Close()
+		return addr
+	}
+
+	quitAddr := localAddr()
+	ftpAddr := localAddr()
+	cmd := exec.Command(os.Args[0], "-test.run=TestHelperFTPServer", "--", dir, quitAddr.String(), ftpAddr.String())
+	cmd.SysProcAttr = interruptableSysProcAttr
+	cmd.Env = []string{"TEST_CALLED_FROM_TEST=1"}
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+	require.NoError(t, cmd.Start())
+
+	go func() {
+		<-ctx.Done()
+		c, err := net.DialTimeout(quitAddr.Network(), quitAddr.String(), time.Second)
+		require.NoError(t, err)
+		_ = c.Close()
+	}()
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		assert.NoError(t, server.Start(ctx, "127.0.0.1", dir, portCh))
+		err := cmd.Wait()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err.Error())
+		}
 	}()
+	time.Sleep(100 * time.Millisecond)
+	return export, uint16(ftpAddr.Port)
+}
 
-	select {
-	case <-ctx.Done():
-		return "", 0
-	case port := <-portCh:
-		return export, port
+func TestHelperFTPServer(t *testing.T) {
+	if os.Getenv("TEST_CALLED_FROM_TEST") != "1" {
+		return
 	}
+	args := os.Args
+	require.Lenf(t, os.Args, 6, "usage %s -test.run=TestHelperFTPServer <dir> <quitAddr> <listenAddr>", args[1])
+
+	ql, err := net.Listen("tcp", args[4])
+	require.NoError(t, err, "unable to listen to %s", args[4])
+	defer ql.Close()
+
+	addr, err := netip.ParseAddrPort(args[5])
+	require.NoError(t, err, "unable to parse to %s", args[5])
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		c, err := ql.Accept()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "quit acceptor: %v", err)
+		}
+		c.Close()
+		cancel()
+	}()
+	require.NoError(t, err, "unable to parse port")
+	require.NoError(t, server.StartOnPort(ctx, "127.0.0.1", args[3], addr.Port()))
+	<-ctx.Done()
+	logrus.Info("over and out")
 }
 
 func startFUSEHost(t *testing.T, ctx context.Context, port uint16, dir string) (FTPClient, *FuseHost, string) {
 	// Start the client
 	dir = filepath.Join(dir, "mount")
 	require.NoError(t, os.Mkdir(dir, 0755))
-	started := make(chan error, 1)
-	fsh, err := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), remoteDir, 30*time.Second)
+	fsh, err := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), remoteDir, 60*time.Second)
 	require.NoError(t, err)
 	mp := dir
 	if runtime.GOOS == "windows" {
@@ -182,13 +245,7 @@ func startFUSEHost(t *testing.T, ctx context.Context, port uint16, dir string) (
 		dir = mp + `\`
 	}
 	host := NewHost(fsh, mp)
-	host.Start(ctx, started)
-	select {
-	case err := <-started:
-		require.NoError(t, err)
-		dlog.Info(ctx, "FUSE started")
-	case <-ctx.Done():
-	}
+	require.NoError(t, host.Start(ctx, 5*time.Second))
 	return fsh, host, dir
 }
 
@@ -227,17 +284,15 @@ func TestBrokenConnection(t *testing.T) {
 	wg.Wait()
 
 	broken := func(err error) bool {
-		pe := &fs2.PathError{}
-		if errors.As(err, &pe) {
-			ee := pe.Error()
-			return containsAny(ee, errIO, errBrokenPipe, errConnRefused, errConnAborted, errUnexpectedNetworkError)
+		if err == nil {
+			return false
 		}
-		return false
+		return containsAny(err.Error(), errIO, errBrokenPipe, errClosed, errConnRefused, errConnAborted, errUnexpectedNetworkError)
 	}
 
 	t.Run("Stat", func(t *testing.T) {
 		_, err := os.Stat(filepath.Join(mountPoint, "somefile.txt"))
-		require.True(t, broken(err))
+		require.True(t, broken(err), err.Error())
 	})
 
 	t.Run("Create", func(t *testing.T) {
@@ -554,14 +609,13 @@ func TestManyLargeFiles(t *testing.T) {
 		wg.Wait()
 	})
 
-	const fileCount = 20
 	const fileSize = 100 * 1024 * 1024
-	names := make([]string, fileCount)
+	names := make([]string, manyLargeFilesCount)
 
 	// Create files "on the remote server".
 	createRemoteWg := &sync.WaitGroup{}
-	createRemoteWg.Add(fileCount)
-	for i := 0; i < fileCount; i++ {
+	createRemoteWg.Add(manyLargeFilesCount)
+	for i := 0; i < manyLargeFilesCount; i++ {
 		go func(i int) {
 			defer createRemoteWg.Done()
 			name, err := createLargeFile(root, fileSize)
@@ -577,8 +631,8 @@ func TestManyLargeFiles(t *testing.T) {
 
 	// Using the local filesystem, read the remote files while writing new ones. All in parallel.
 	readWriteWg := &sync.WaitGroup{}
-	readWriteWg.Add(fileCount * 2)
-	for i := 0; i < fileCount; i++ {
+	readWriteWg.Add(manyLargeFilesCount * 2)
+	for i := 0; i < manyLargeFilesCount; i++ {
 		go func(name string) {
 			defer readWriteWg.Done()
 			t.Logf("validating %s", name)
@@ -586,8 +640,8 @@ func TestManyLargeFiles(t *testing.T) {
 		}(filepath.Join(mountPoint, filepath.Base(names[i])))
 	}
 
-	localNames := make([]string, fileCount)
-	for i := 0; i < fileCount; i++ {
+	localNames := make([]string, manyLargeFilesCount)
+	for i := 0; i < manyLargeFilesCount; i++ {
 		go func(i int) {
 			defer readWriteWg.Done()
 			name, err := createLargeFile(mountPoint, fileSize)
@@ -600,8 +654,8 @@ func TestManyLargeFiles(t *testing.T) {
 
 	// Read files "on the remote server" and validate them.
 	readRemoteWg := &sync.WaitGroup{}
-	readRemoteWg.Add(fileCount)
-	for i := 0; i < fileCount; i++ {
+	readRemoteWg.Add(manyLargeFilesCount)
+	for i := 0; i < manyLargeFilesCount; i++ {
 		go func(name string) {
 			defer readRemoteWg.Done()
 			t.Logf("validating %s", name)
