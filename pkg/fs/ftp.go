@@ -38,7 +38,7 @@ type fuseImpl struct {
 	// cancel the ctx, and hence the GC loop
 	cancel context.CancelFunc
 
-	// Mutex protects nextHandle and current
+	// Mutex protects nextHandle, current, and shuttingDown
 	sync.RWMutex
 
 	// Next file handle. File handles are opaque to FUSE, and much faster to use than
@@ -47,6 +47,9 @@ type fuseImpl struct {
 
 	// current maps file handles to info structs
 	current map[uint64]*info
+
+	// shuttingDown prevent that new handles are added
+	shuttingDown bool
 }
 
 // info holds information about file or directory that has been obtained from
@@ -146,10 +149,35 @@ func (f *fuseImpl) Create(path string, flags int, _ uint32) (int, uint64) {
 	return 0, fe.fh
 }
 
-// Destroy will send the QUIT message to the FTP server and disconnect
+// Destroy will drain all ongoing writes, and for each active connection, send the QUIT message to the FTP server and disconnect
 func (f *fuseImpl) Destroy() {
 	defer f.logPanic()
 	dlog.Debug(f.ctx, "Destroy")
+
+	f.Lock()
+	// Prevent new entries from being added
+	f.shuttingDown = true
+	pf := make([]*info, len(f.current))
+	i := 0
+	for _, fe := range f.current {
+		pf[i] = fe
+		i++
+	}
+	f.Unlock()
+
+	wg := sync.WaitGroup{}
+	wg.Add(len(pf))
+	for _, fe := range pf {
+		go func(fe *info) {
+			defer wg.Done()
+			fe.close()
+			f.Lock()
+			delete(f.current, fe.fh)
+			f.Unlock()
+			_ = fe.conn.Quit()
+		}(fe)
+	}
+	wg.Wait()
 	f.pool.quit(f.ctx)
 	f.cancel()
 }
@@ -448,33 +476,31 @@ func (f *fuseImpl) cacheSize() int {
 
 func (f *fuseImpl) clearPath(p string) {
 	var pf []*info
-	f.Lock()
+	f.RLock()
 	for _, fe := range f.current {
 		if strings.HasPrefix(fe.path, p) {
 			pf = append(pf, fe)
 		}
 	}
-	for _, fe := range pf {
-		delete(f.current, fe.fh)
-	}
-	f.Unlock()
+	f.RUnlock()
 	for _, fe := range pf {
 		fe.close()
-		if fe.conn != nil {
-			f.pool.put(f.ctx, fe.conn)
-		}
+		f.Lock()
+		delete(f.current, fe.fh)
+		f.Unlock()
+		f.pool.put(f.ctx, fe.conn)
 	}
 }
 
 func (f *fuseImpl) delete(fh uint64) {
-	f.Lock()
+	f.RLock()
 	fe, ok := f.current[fh]
+	f.RUnlock()
 	if ok {
-		delete(f.current, fh)
-	}
-	f.Unlock()
-	if ok && fe.conn != nil {
 		fe.close()
+		f.Lock()
+		delete(f.current, fe.fh)
+		f.Unlock()
 		f.pool.put(f.ctx, fe.conn)
 	}
 }
@@ -550,6 +576,12 @@ func (f *fuseImpl) loadHandle(fh uint64) (*info, int) {
 }
 
 func (f *fuseImpl) openHandle(path string, create, append bool) (nfe *info, e *ftp.Entry, errCode int) {
+	f.RLock()
+	shuttingDown := f.shuttingDown
+	f.RUnlock()
+	if shuttingDown {
+		return nil, nil, -fuse.ECANCELED
+	}
 	conn, err := f.pool.get(f.ctx)
 	if err != nil {
 		return nil, nil, f.errToFuseErr(err)

@@ -1,6 +1,6 @@
 module local
 
-go 1.18
+go 1.20
 
 require github.com/golangci/golangci-lint v1.52.2
 
@@ -107,10 +107,7 @@ require (
 	github.com/nishanths/predeclared v0.2.2 // indirect
 	github.com/nunnatsa/ginkgolinter v0.11.0 // indirect
 	github.com/olekukonko/tablewriter v0.0.5 // indirect
-	github.com/pelletier/go-toml v1.9.5 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.7 // indirect
-	github.com/phayes/checkstyle v0.0.0-20170904204023-bfd46e6a821d // indirect
-	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/polyfloyd/go-errorlint v1.4.0 // indirect
 	github.com/prometheus/client_golang v1.15.0 // indirect
@@ -146,11 +143,10 @@ require (
 	github.com/stretchr/objx v0.5.0 // indirect
 	github.com/stretchr/testify v1.8.2 // indirect
 	github.com/subosito/gotenv v1.4.2 // indirect
-	github.com/sylvia7788/contextcheck v1.0.9 // indirect
 	github.com/t-yuki/gocover-cobertura v0.0.0-20180217150009-aaee18c8195c // indirect
 	github.com/tdakkota/asciicheck v0.2.0 // indirect
 	github.com/tetafro/godot v1.4.11 // indirect
-	github.com/timakin/bodyclose v0.0.0-20230419012055-cdd6cc35a43a // indirect
+	github.com/timakin/bodyclose v0.0.0-20230421092635-574207250966 // indirect
 	github.com/timonwong/loggercheck v0.9.4 // indirect
 	github.com/tomarrell/wrapcheck/v2 v2.8.1 // indirect
 	github.com/tommy-muehle/go-mnd/v2 v2.5.1 // indirect
@@ -163,8 +159,8 @@ require (
 	go.uber.org/atomic v1.10.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.24.0 // indirect
-	golang.org/x/exp v0.0.0-20230418202329-0354be287a23 // indirect
-	golang.org/x/exp/typeparams v0.0.0-20230418202329-0354be287a23 // indirect
+	golang.org/x/exp v0.0.0-20230420155640-133eef4313cb // indirect
+	golang.org/x/exp/typeparams v0.0.0-20230420155640-133eef4313cb // indirect
 	golang.org/x/mod v0.10.0 // indirect
 	golang.org/x/sync v0.1.0 // indirect
 	golang.org/x/sys v0.7.0 // indirect
