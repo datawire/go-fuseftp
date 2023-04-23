@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -190,7 +191,9 @@ func (p *connPool) put(ctx context.Context, conn *ftp.ServerConn) {
 func closeList(ctx context.Context, conns []*ftp.ServerConn, silent bool) {
 	for _, c := range conns {
 		if err := c.Quit(); err != nil && !silent {
-			dlog.Errorf(ctx, "quit failed: %v", err)
+			if !strings.Contains(err.Error(), "use of closed") {
+				dlog.Errorf(ctx, "quit failed: %v", err)
+			}
 		}
 	}
 }
