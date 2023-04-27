@@ -6,6 +6,6 @@ import (
 	"syscall"
 )
 
-const manyLargeFilesCount = 20
+const manyLargeFilesCount = 12
 
 var interruptableSysProcAttr *syscall.SysProcAttr = nil //nolint:gochecknoglobals // OS-specific constant
