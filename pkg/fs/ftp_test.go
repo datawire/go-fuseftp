@@ -602,13 +602,6 @@ func TestManyLargeFiles(t *testing.T) {
 	root, port := startFTPServer(t, ctx, tmp, &wg)
 	require.NotEqual(t, uint16(0), port)
 
-	_, host, mountPoint := startFUSEHost(t, ctx, port, tmp)
-	t.Cleanup(func() {
-		host.Stop()
-		cancel()
-		wg.Wait()
-	})
-
 	const fileSize = 100 * 1024 * 1024
 	names := make([]string, manyLargeFilesCount)
 
@@ -628,6 +621,18 @@ func TestManyLargeFiles(t *testing.T) {
 	if t.Failed() {
 		t.Fatal("failed attempting to create large files")
 	}
+
+	_, host, mountPoint := startFUSEHost(t, ctx, port, tmp)
+	stopped := false
+	stopFuse := func() {
+		if !stopped {
+			stopped = true
+			host.Stop()
+			cancel()
+			wg.Wait()
+		}
+	}
+	t.Cleanup(stopFuse)
 
 	// Using the local filesystem, read the remote files while writing new ones. All in parallel.
 	readWriteWg := &sync.WaitGroup{}
@@ -651,6 +656,7 @@ func TestManyLargeFiles(t *testing.T) {
 		}(i)
 	}
 	readWriteWg.Wait()
+	stopFuse()
 
 	// Read files "on the remote server" and validate them.
 	readRemoteWg := &sync.WaitGroup{}
@@ -709,7 +715,7 @@ func validateLargeFile(name string, sz int) error {
 		return err
 	}
 	if st.Size() != int64(sz) {
-		return fmt.Errorf("file size differ. Expected %d, got %d", sz, st.Size())
+		return fmt.Errorf("file size of %s differ. Expected %d, got %d", name, sz, st.Size())
 	}
 	bf := bufio.NewReader(f)
 	qz := uint32(sz / 4)
@@ -724,7 +730,7 @@ func validateLargeFile(name string, sz int) error {
 		}
 		x := binary.BigEndian.Uint32(buf)
 		if i != x {
-			return fmt.Errorf("content differ at position %d: expected %d, got %d", i*4, i, x)
+			return fmt.Errorf("content of %s differ at position %d: expected %d, got %d", name, i*4, i, x)
 		}
 	}
 	return nil
