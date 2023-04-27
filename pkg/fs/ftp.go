@@ -4,11 +4,13 @@ package fs
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"math"
 	"net/netip"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -138,7 +140,7 @@ func (f *fuseImpl) SetAddress(ctx context.Context, addr netip.AddrPort) error {
 
 func (f *fuseImpl) logPanic() {
 	if r := recover(); r != nil {
-		dlog.Error(f.ctx, derror.PanicToError(r))
+		dlog.Errorf(f.ctx, "%+v", derror.PanicToError(r))
 	}
 }
 
@@ -238,10 +240,7 @@ func (f *fuseImpl) Mkdir(path string, mode uint32) int {
 	err := f.withConn(func(conn *ftp.ServerConn) error {
 		return conn.MakeDir(relpath(path))
 	})
-	if err != nil {
-		return f.errToFuseErr(err)
-	}
-	return 0
+	return f.errToFuseErr(err)
 }
 
 // Open ensures checks if the file exists, and if it doesn't, ensure that
@@ -315,7 +314,9 @@ func (f *fuseImpl) Read(path string, buff []byte, ofst int64, fh uint64) int {
 				// Retain the ftp.Response until the file handle is released
 				break
 			}
-			return f.errToFuseErr(err)
+			if errCode = f.errToFuseErr(err); errCode < 0 {
+				return errCode
+			}
 		}
 	}
 	fe.rof += uint64(bytesRead)
@@ -344,8 +345,9 @@ func (f *fuseImpl) Readdir(path string, fill func(name string, stat *fuse.Stat_t
 		return errCode
 	}
 	es, err := fe.conn.List(relpath(path))
-	if err != nil {
-		return f.errToFuseErr(err)
+	errCode = f.errToFuseErr(err)
+	if errCode < 0 {
+		return errCode
 	}
 	for _, e := range es {
 		s := &fuse.Stat_t{}
@@ -410,8 +412,8 @@ func (f *fuseImpl) Truncate(path string, size int64, fh uint64) int {
 	if errCode < 0 {
 		return errCode
 	}
-	if err := fe.conn.StorFrom(relpath(path), bytes.NewReader(nil), uint64(size)); err != nil {
-		return f.errToFuseErr(err)
+	if errCode = f.errToFuseErr(fe.conn.StorFrom(relpath(path), bytes.NewReader(nil), uint64(size))); errCode < 0 {
+		return errCode
 	}
 	return 0
 }
@@ -525,12 +527,31 @@ func (f *fuseImpl) errToFuseErr(err error) int {
 		return 0
 	}
 
+	var tpe *textproto.Error
+	if errors.As(err, &tpe) {
+		if tpe.Code == ftp.StatusCommandOK {
+			return 0
+		}
+		switch tpe.Code {
+		case ftp.StatusClosingDataConnection:
+			return -fuse.ECONNABORTED
+		case ftp.StatusNotAvailable:
+			return -fuse.EADDRNOTAVAIL
+		case ftp.StatusCanNotOpenDataConnection:
+			return -fuse.ECONNREFUSED
+		case ftp.StatusTransfertAborted:
+			return -fuse.ECONNABORTED
+		case ftp.StatusInvalidCredentials:
+			return -fuse.EACCES
+		case ftp.StatusHostUnavailable:
+			return -fuse.EHOSTUNREACH
+		case ftp.StatusBadFileName:
+			return -fuse.EINVAL
+		}
+	}
 	em := err.Error()
 	switch {
-	case strings.HasPrefix(em, fmt.Sprintf("%d ", ftp.StatusCommandOK)):
-		return 0
 	case
-		strings.HasPrefix(em, fmt.Sprintf("%d ", ftp.StatusClosingDataConnection)),
 		strings.Contains(em, errConnAborted),
 		strings.Contains(em, errClosed):
 		return -fuse.ECONNABORTED
@@ -598,8 +619,9 @@ func (f *fuseImpl) openHandle(path string, create, append bool) (nfe *info, e *f
 		return nil, nil, -fuse.ECANCELED
 	}
 	conn, err := f.pool.get(f.ctx)
-	if err != nil {
-		return nil, nil, f.errToFuseErr(err)
+	ec := f.errToFuseErr(err)
+	if ec < 0 {
+		return nil, nil, ec
 	}
 
 	defer func() {
@@ -615,8 +637,8 @@ func (f *fuseImpl) openHandle(path string, create, append bool) (nfe *info, e *f
 		}
 
 		// Create an empty file to ensure that it can be created
-		if err = conn.Stor(relpath(path), bytes.NewReader(nil)); err != nil {
-			return nil, nil, f.errToFuseErr(err)
+		if ec = f.errToFuseErr(conn.Stor(relpath(path), bytes.NewReader(nil))); ec < 0 {
+			return nil, nil, ec
 		}
 		e = &ftp.Entry{
 			Name: filepath.Base(path),
