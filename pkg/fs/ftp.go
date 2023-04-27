@@ -74,7 +74,12 @@ type info struct {
 
 	// rr and of is used when reading data from a remote file
 	rr *ftp.Response
-	of uint64
+
+	// Current offset for read operations.
+	rof uint64
+
+	// Current offset for write operations.
+	wof uint64
 
 	// The writer is the writer side of a io.Pipe() used when writing data to a remote file.
 	writer io.WriteCloser
@@ -284,8 +289,8 @@ func (f *fuseImpl) Read(path string, buff []byte, ofst int64, fh uint64) int {
 
 	of := uint64(ofst)
 
-	if fe.of != of && fe.rr != nil {
-		// This should normally not happen, but if it does, let's restart the read
+	if fe.rof != of && fe.rr != nil {
+		// Restart the read with new offset
 		_ = fe.rr.Close()
 		fe.rr = nil
 	}
@@ -293,11 +298,11 @@ func (f *fuseImpl) Read(path string, buff []byte, ofst int64, fh uint64) int {
 	if fe.rr == nil {
 		// Obtain the ftp.Response. It acts as an io.Reader
 		rr, err := fe.conn.RetrFrom(relpath(path), of)
-		if err != nil {
-			return f.errToFuseErr(err)
+		if errCode = f.errToFuseErr(err); errCode < 0 {
+			return errCode
 		}
 		fe.rr = rr
-		fe.of = of
+		fe.rof = of
 	}
 
 	bytesRead := 0
@@ -313,7 +318,7 @@ func (f *fuseImpl) Read(path string, buff []byte, ofst int64, fh uint64) int {
 			return f.errToFuseErr(err)
 		}
 	}
-	fe.of += uint64(bytesRead)
+	fe.rof += uint64(bytesRead)
 
 	// Errors are always negative and Read expects the number of bytes read to be returned here.
 	return bytesRead
@@ -427,42 +432,52 @@ func (f *fuseImpl) Unlink(path string) int {
 // data connection that is established to facilitate the write will remain open
 // until the handle is released by a call to Release
 func (f *fuseImpl) Write(path string, buf []byte, ofst int64, fh uint64) int {
-	dlog.Debugf(f.ctx, "Write(%s, sz=%d, off=%d, %d)", path, len(buf), ofst, fh)
+	defer f.logPanic()
+	// dlog.Debugf(f.ctx, "Write(%s, sz=%d, off=%d, %d)", path, len(buf), ofst, fh)
 	fe, errCode := f.loadHandle(fh)
 	if errCode < 0 {
 		return errCode
 	}
 	of := uint64(ofst)
-	var err error
+
+	pipeCopy := func(conn *ftp.ServerConn, of uint64) {
+		fe.wof = of
+		var reader io.ReadCloser
+		reader, fe.writer = io.Pipe()
+		fe.wg.Add(1)
+		go func() {
+			defer func() {
+				fe.wg.Done()
+				f.pool.put(f.ctx, conn)
+			}()
+			if err := conn.StorFrom(relpath(path), reader, of); err != nil {
+				dlog.Errorf(f.ctx, "error storing: %v", err)
+			}
+		}()
+	}
 
 	// A connection dedicated to the Write function is needed because there
 	// might be simultaneous Read and Write operations on the same file handle.
 	if fe.writer == nil {
-		var conn *ftp.ServerConn
-		if conn, err = f.pool.get(f.ctx); err == nil {
-			var reader io.Reader
-			reader, fe.writer = io.Pipe()
-
-			// start the pipe pumper. It ends when the fe.writer closes. That
-			// happens when Release is called
-			fe.wg.Add(1)
-			go func() {
-				defer func() {
-					fe.wg.Done()
-					f.pool.put(f.ctx, conn)
-				}()
-				if err := conn.StorFrom(relpath(path), reader, of); err != nil {
-					dlog.Errorf(f.ctx, "error storing: %v", err)
-				}
-			}()
+		conn, err := f.pool.get(f.ctx)
+		if errCode = f.errToFuseErr(err); errCode < 0 {
+			return errCode
 		}
-	}
-	if err != nil {
-		return f.errToFuseErr(err)
+
+		// start the pipe pumper. It ends when the fe.writer closes. That
+		// happens when Release is called
+		pipeCopy(conn, of)
+	} else if fe.wof != of {
+		// Drain and restart the write operation.
+		fe.writer.Close()
+		fe.wg.Wait()
+		pipeCopy(fe.conn, of)
 	}
 	n, err := fe.writer.Write(buf)
-	if err != nil {
-		return f.errToFuseErr(err)
+	if errCode = f.errToFuseErr(err); errCode < 0 {
+		n = errCode
+	} else {
+		fe.wof += uint64(n)
 	}
 	return n
 }
@@ -617,7 +632,7 @@ func (f *fuseImpl) openHandle(path string, create, append bool) (nfe *info, e *f
 		conn:     conn,
 	}
 	if append {
-		nfe.of = e.Size
+		nfe.wof = e.Size
 	}
 	f.Lock()
 	f.current[f.nextHandle] = nfe
