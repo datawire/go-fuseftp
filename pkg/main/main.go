@@ -12,11 +12,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 
+	"github.com/datawire/dlib/dlog"
 	"github.com/datawire/go-fuseftp/pkg/fs"
 	"github.com/datawire/go-fuseftp/rpc"
 )
@@ -52,6 +54,16 @@ func addrPort(ap *rpc.AddressAndPort) (netip.AddrPort, error) {
 }
 
 func (s *service) Mount(_ context.Context, rq *rpc.MountRequest) (*rpc.MountIdentifier, error) {
+	logger := logrus.New()
+	if rq.LogLevel != "" {
+		lvl, err := logrus.ParseLevel(rq.LogLevel)
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		logger.SetLevel(lvl)
+	}
+	ctx := dlog.WithLogger(s.ctx, dlog.WrapLogrus(logger))
+
 	s.Lock()
 	defer s.Unlock()
 
@@ -65,7 +77,7 @@ func (s *service) Mount(_ context.Context, rq *rpc.MountRequest) (*rpc.MountIden
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithCancel(s.ctx)
+	ctx, cancel := context.WithCancel(ctx)
 	fi, err := fs.NewFTPClient(ctx, ap, rq.Directory, rq.ReadTimeout.AsDuration())
 	if err != nil {
 		cancel()
