@@ -83,6 +83,9 @@ type info struct {
 	// Current offset for write operations.
 	wof uint64
 
+	// Estimated size (based on initial size and write operations)
+	entry *ftp.Entry
+
 	// The writer is the writer side of a io.Pipe() used when writing data to a remote file.
 	writer io.WriteCloser
 
@@ -298,6 +301,7 @@ func (f *fuseImpl) Read(path string, buff []byte, ofst int64, fh uint64) int {
 		// Obtain the ftp.Response. It acts as an io.Reader
 		rr, err := fe.conn.RetrFrom(relpath(path), of)
 		if errCode = f.errToFuseErr(err); errCode < 0 {
+			dlog.Errorf(f.ctx, "error during Read(%s, sz=%d, off=%d, %d): %v", path, len(buff), ofst, fh, err)
 			return errCode
 		}
 		fe.rr = rr
@@ -435,14 +439,20 @@ func (f *fuseImpl) Unlink(path string) int {
 // until the handle is released by a call to Release
 func (f *fuseImpl) Write(path string, buf []byte, ofst int64, fh uint64) int {
 	defer f.logPanic()
-	// dlog.Debugf(f.ctx, "Write(%s, sz=%d, off=%d, %d)", path, len(buf), ofst, fh)
+	dlog.Debugf(f.ctx, "Write(%s, sz=%d, off=%d, %d)", path, len(buf), ofst, fh)
 	fe, errCode := f.loadHandle(fh)
 	if errCode < 0 {
 		return errCode
 	}
 	of := uint64(ofst)
 
-	pipeCopy := func(conn *ftp.ServerConn, of uint64) {
+	pipeCopy := func(of uint64) int {
+		// A connection dedicated to the Write function is needed because there
+		// might be simultaneous Read and Write operations on the same file handle.
+		conn, err := f.pool.get(f.ctx)
+		if errCode = f.errToFuseErr(err); errCode < 0 {
+			return errCode
+		}
 		fe.wof = of
 		var reader io.ReadCloser
 		reader, fe.writer = io.Pipe()
@@ -456,30 +466,31 @@ func (f *fuseImpl) Write(path string, buf []byte, ofst int64, fh uint64) int {
 				dlog.Errorf(f.ctx, "error storing: %v", err)
 			}
 		}()
+		return 0
 	}
 
-	// A connection dedicated to the Write function is needed because there
-	// might be simultaneous Read and Write operations on the same file handle.
+	var ec int
 	if fe.writer == nil {
-		conn, err := f.pool.get(f.ctx)
-		if errCode = f.errToFuseErr(err); errCode < 0 {
-			return errCode
-		}
-
 		// start the pipe pumper. It ends when the fe.writer closes. That
 		// happens when Release is called
-		pipeCopy(conn, of)
+		ec = pipeCopy(of)
 	} else if fe.wof != of {
 		// Drain and restart the write operation.
-		fe.writer.Close()
+		_ = fe.writer.Close()
 		fe.wg.Wait()
-		pipeCopy(fe.conn, of)
+		ec = pipeCopy(of)
+	}
+	if ec != 0 {
+		return ec
 	}
 	n, err := fe.writer.Write(buf)
 	if errCode = f.errToFuseErr(err); errCode < 0 {
 		n = errCode
 	} else {
 		fe.wof += uint64(n)
+		if fe.wof > fe.entry.Size {
+			fe.entry.Size = fe.wof
+		}
 	}
 	return n
 }
@@ -523,6 +534,14 @@ func (f *fuseImpl) delete(fh uint64) {
 }
 
 func (f *fuseImpl) errToFuseErr(err error) int {
+	ec := f.intErrToFuseErr(err)
+	if ec != 0 {
+		dlog.Debugf(f.ctx, "** error: %v, code %d", err, ec)
+	}
+	return ec
+}
+
+func (f *fuseImpl) intErrToFuseErr(err error) int {
 	if err == nil {
 		return 0
 	}
@@ -582,6 +601,14 @@ func (f *fuseImpl) errToFuseErr(err error) int {
 }
 
 func (f *fuseImpl) getEntry(path string) (e *ftp.Entry, fuseErr int) {
+	f.RLock()
+	for _, fe := range f.current {
+		if fe.path == path {
+			f.RUnlock()
+			return fe.entry, 0
+		}
+	}
+	f.RUnlock()
 	err := f.withConn(func(conn *ftp.ServerConn) error {
 		var err error
 		e, err = conn.GetEntry(relpath(path))
@@ -597,8 +624,7 @@ func (f *fuseImpl) loadEntry(fh uint64) (*ftp.Entry, int) {
 	if !ok {
 		return nil, -fuse.ENOENT
 	}
-	e, err := fe.conn.GetEntry(relpath(fe.path))
-	return e, f.errToFuseErr(err)
+	return fe.entry, 0
 }
 
 func (f *fuseImpl) loadHandle(fh uint64) (*info, int) {
@@ -647,18 +673,20 @@ func (f *fuseImpl) openHandle(path string, create, append bool) (nfe *info, e *f
 		}
 	}
 
+	f.Lock()
+	fh := f.nextHandle
+	f.nextHandle++
 	nfe = &info{
 		fuseImpl: f,
 		path:     path,
-		fh:       f.nextHandle,
+		fh:       fh,
 		conn:     conn,
+		entry:    e,
 	}
 	if append {
 		nfe.wof = e.Size
 	}
-	f.Lock()
-	f.current[f.nextHandle] = nfe
-	f.nextHandle++
+	f.current[fh] = nfe
 	f.Unlock()
 	return nfe, e, 0
 }

@@ -117,6 +117,9 @@ func (p *connPool) get(ctx context.Context) (conn *ftp.ServerConn, err error) {
 		p.busyList = idle
 		conn = idle.conn
 	}
+	if dlog.MaxLogLevel(ctx) >= dlog.LogLevelDebug {
+		dlog.Debugf(ctx, "get idle=%d, busy=%d", p.busyList.size(), p.idleList.size())
+	}
 	p.Unlock()
 	if conn == nil {
 		conn, err = p.connect(ctx)
@@ -184,6 +187,9 @@ func (p *connPool) put(ctx context.Context, conn *ftp.ServerConn) {
 			next: p.idleList,
 		}
 		p.idleList = cl
+	}
+	if dlog.MaxLogLevel(ctx) >= dlog.LogLevelDebug {
+		dlog.Debugf(ctx, "idle=%d, busy=%d", p.busyList.size(), p.idleList.size())
 	}
 	p.Unlock()
 }
