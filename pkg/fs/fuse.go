@@ -7,9 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/winfsp/cgofuse/fuse"
-
-	"github.com/datawire/dlib/dlog"
 )
 
 // FuseHost wraps a fuse.FileSystemHost and adds Start/Stop semantics
@@ -48,7 +47,7 @@ func (fh *FuseHost) Start(ctx context.Context, startTimeout time.Duration) error
 	startCtx, startCancel := context.WithTimeout(ctx, startTimeout)
 	defer startCancel()
 	go fh.detectFuseStarted(startCtx, started)
-	if dlog.MaxLogLevel(ctx) >= dlog.LogLevelDebug {
+	if logrus.GetLevel() >= logrus.DebugLevel {
 		opts = append(opts, "-o", "debug")
 	}
 
@@ -71,7 +70,7 @@ func (fh *FuseHost) Start(ctx context.Context, startTimeout time.Duration) error
 			fh.host.Unmount()
 		case mountResult := <-mCh:
 			if !mountResult {
-				dlog.Errorf(ctx, "fuse mount of %s failed", fh.mountPoint)
+				logrus.Errorf("fuse mount of %s failed", fh.mountPoint)
 			}
 		}
 	}()

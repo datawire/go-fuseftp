@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"math"
@@ -19,10 +18,8 @@ import (
 	"time"
 
 	"github.com/jlaffaye/ftp"
+	log "github.com/sirupsen/logrus"
 	"github.com/winfsp/cgofuse/fuse"
-
-	"github.com/datawire/dlib/derror"
-	"github.com/datawire/dlib/dlog"
 )
 
 // fuseImpl implements the fuse.FileSystemInterface. The official documentation for the API
@@ -33,11 +30,7 @@ type fuseImpl struct {
 	// connPool is the pool of control connections to the remote FTP server.
 	pool connPool
 
-	// ctx is only used for logging purposes and final termination, because neither the ftp
-	// nor the fuse implementation is context aware at this point.
-	ctx context.Context
-
-	// cancel the ctx, and hence the GC loop
+	// cancel the GC loop
 	cancel context.CancelFunc
 
 	// Mutex protects nextHandle, current, and shuttingDown
@@ -93,10 +86,10 @@ type info struct {
 // close this handle and free up any resources that it holds.
 func (i *info) close() {
 	if i.rr != nil {
-		i.rr.Close()
+		_ = i.rr.Close()
 	}
 	if i.writer != nil {
-		i.writer.Close()
+		_ = i.writer.Close()
 	}
 	i.wg.Wait()
 }
@@ -109,46 +102,49 @@ type FTPClient interface {
 	// SetAddress will quit open connections, change the address, and reconnect
 	// The method is intended to be used when a FUSE mount must survive a change of
 	// FTP server address.
-	SetAddress(ctx context.Context, addr netip.AddrPort) error
+	SetAddress(addr netip.AddrPort) error
 }
 
 // NewFTPClient returns an implementation of the fuse.FileSystemInterface that is backed by
 // an FTP server connection tp the address. The dir parameter is the directory that the
 // FTP server changes to when connecting.
 func NewFTPClient(ctx context.Context, addr netip.AddrPort, dir string, readTimeout time.Duration) (FTPClient, error) {
+	ctx, cancel := context.WithCancel(ctx)
 	f := &fuseImpl{
+		cancel:  cancel,
 		current: make(map[uint64]*info),
 		pool: connPool{
 			dir:     dir,
 			timeout: readTimeout,
 		},
 	}
+	go func() {
+		ticker := time.NewTicker(stalePeriod)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				f.pool.tidy()
+			}
+		}
+	}()
 
-	ctx, cancel := context.WithCancel(ctx)
-	if err := f.pool.setAddr(ctx, addr); err != nil {
+	if err := f.pool.setAddr(addr); err != nil {
 		cancel()
 		return nil, err
 	}
-	f.ctx = ctx
-	f.cancel = cancel
 	return f, nil
 }
 
-func (f *fuseImpl) SetAddress(ctx context.Context, addr netip.AddrPort) error {
-	return f.pool.setAddr(ctx, addr)
-}
-
-func (f *fuseImpl) logPanic() {
-	if r := recover(); r != nil {
-		dlog.Errorf(f.ctx, "%+v", derror.PanicToError(r))
-	}
+func (f *fuseImpl) SetAddress(addr netip.AddrPort) error {
+	return f.pool.setAddr(addr)
 }
 
 // Create will create a file of size zero unless the file already exists
 // The third argument, the mode bits, are currently ignored
 func (f *fuseImpl) Create(path string, flags int, _ uint32) (int, uint64) {
-	defer f.logPanic()
-	dlog.Debugf(f.ctx, "Create(%s, %#x)", path, flags)
+	log.Debugf("Create(%s, %#x)", path, flags)
 	fe, _, errCode := f.openHandle(path, true, flags&os.O_APPEND == os.O_APPEND)
 	if errCode < 0 {
 		return errCode, 0
@@ -158,8 +154,7 @@ func (f *fuseImpl) Create(path string, flags int, _ uint32) (int, uint64) {
 
 // Destroy will drain all ongoing writes, and for each active connection, send the QUIT message to the FTP server and disconnect
 func (f *fuseImpl) Destroy() {
-	defer f.logPanic()
-	dlog.Debug(f.ctx, "Destroy")
+	log.Debug("Destroy")
 
 	f.Lock()
 	// Prevent new entries from being added
@@ -185,14 +180,13 @@ func (f *fuseImpl) Destroy() {
 		}(fe)
 	}
 	wg.Wait()
-	f.pool.quit(f.ctx)
+	f.pool.quit()
 	f.cancel()
 }
 
 // Flush is a noop in this implementation
 func (f *fuseImpl) Flush(path string, fh uint64) int {
-	defer f.logPanic()
-	dlog.Debugf(f.ctx, "Flush(%s, %d)", path, fh)
+	log.Debugf("Flush(%s, %d)", path, fh)
 	return 0
 }
 
@@ -200,8 +194,7 @@ func (f *fuseImpl) Flush(path string, fh uint64) int {
 // UID and GID of the caller. File mode is always 0644 and Directory
 // mode is always 0755.
 func (f *fuseImpl) Getattr(path string, s *fuse.Stat_t, fh uint64) int {
-	defer f.logPanic()
-	dlog.Debugf(f.ctx, "Getattr(%s, %d)", path, fh)
+	log.Debugf("Getattr(%s, %d)", path, fh)
 	var e *ftp.Entry
 	var errCode int
 	if fh != math.MaxUint64 {
@@ -219,24 +212,11 @@ func (f *fuseImpl) Getattr(path string, s *fuse.Stat_t, fh uint64) int {
 // Init starts the garbage collector that removes cached items when they
 // haven't been used for a period of time.
 func (f *fuseImpl) Init() {
-	defer f.logPanic()
-	dlog.Debug(f.ctx, "Init")
-	go func() {
-		ticker := time.NewTicker(stalePeriod)
-		for {
-			select {
-			case <-f.ctx.Done():
-				return
-			case <-ticker.C:
-				f.pool.tidy(f.ctx)
-			}
-		}
-	}()
+	log.Debug("Init")
 }
 
 func (f *fuseImpl) Mkdir(path string, mode uint32) int {
-	defer f.logPanic()
-	dlog.Debugf(f.ctx, "Mkdir(%s, %O)", path, mode)
+	log.Debugf("Mkdir(%s, %O)", path, mode)
 	err := f.withConn(func(conn *ftp.ServerConn) error {
 		return conn.MakeDir(relpath(path))
 	})
@@ -246,20 +226,18 @@ func (f *fuseImpl) Mkdir(path string, mode uint32) int {
 // Open ensures checks if the file exists, and if it doesn't, ensure that
 // a file of size zero can be created in the server.
 func (f *fuseImpl) Open(path string, flags int) (int, uint64) {
-	defer f.logPanic()
-	dlog.Debugf(f.ctx, "Open(%s, %#x)", path, flags)
+	log.Debugf("Open(%s, %#x)", path, flags)
 	fe, _, errCode := f.openHandle(path, flags&os.O_CREATE == os.O_CREATE, flags&os.O_APPEND == os.O_APPEND)
 	if errCode < 0 {
 		return errCode, 0
 	}
-	dlog.Debugf(f.ctx, "Open(%s, %#x) -> %d", path, flags, fe.fh)
+	log.Debugf("Open(%s, %#x) -> %d", path, flags, fe.fh)
 	return 0, fe.fh
 }
 
 // Opendir is like Open but will fail unless the path represents a directory
 func (f *fuseImpl) Opendir(path string) (int, uint64) {
-	defer f.logPanic()
-	dlog.Debugf(f.ctx, "Opendir(%s)", path)
+	log.Debugf("Opendir(%s)", path)
 	fe, e, errCode := f.openHandle(path, false, false)
 	if errCode < 0 {
 		return errCode, 0
@@ -268,7 +246,7 @@ func (f *fuseImpl) Opendir(path string) (int, uint64) {
 		f.delete(fe.fh)
 		return -fuse.ENOTDIR, 0
 	}
-	dlog.Debugf(f.ctx, "Opendir(%s) -> %d", path, fe.fh)
+	log.Debugf("Opendir(%s) -> %d", path, fe.fh)
 	return 0, fe.fh
 }
 
@@ -279,8 +257,7 @@ func (f *fuseImpl) Opendir(path string) (int, uint64) {
 // Read requires that fuse is started with -o sync_read to ensure that the
 // read calls arrive in sequence.
 func (f *fuseImpl) Read(path string, buff []byte, ofst int64, fh uint64) int {
-	defer f.logPanic()
-	dlog.Debugf(f.ctx, "Read(%s, sz=%d, off=%d, %d)", path, len(buff), ofst, fh)
+	log.Debugf("Read(%s, sz=%d, off=%d, %d)", path, len(buff), ofst, fh)
 	fe, errCode := f.loadHandle(fh)
 	if errCode < 0 {
 		return errCode
@@ -331,8 +308,8 @@ func relpath(path string) string {
 
 // Readdir will read the remote directory using an MLSD command and call the given fill function
 // for each entry that was found. The ofst parameter is ignored.
-func (f *fuseImpl) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofst int64) bool, ofst int64, fh uint64) int {
-	dlog.Debugf(f.ctx, "ReadDir(%s, %d)", path, fh)
+func (f *fuseImpl) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofst int64) bool, _ int64, fh uint64) int {
+	log.Debugf("ReadDir(%s, %d)", path, fh)
 	var fe *info
 	var errCode int
 	if fh == math.MaxUint64 {
@@ -361,21 +338,21 @@ func (f *fuseImpl) Readdir(path string, fill func(name string, stat *fuse.Stat_t
 
 // Release will release the resources associated with the given file handle
 func (f *fuseImpl) Release(path string, fh uint64) int {
-	dlog.Debugf(f.ctx, "Release(%s, %d)", path, fh)
+	log.Debugf("Release(%s, %d)", path, fh)
 	f.delete(fh)
 	return 0
 }
 
 // Releasedir will release the resources associated with the given file handle
 func (f *fuseImpl) Releasedir(path string, fh uint64) int {
-	dlog.Debugf(f.ctx, "Releasedir(%s, %d)", path, fh)
+	log.Debugf("Releasedir(%s, %d)", path, fh)
 	f.delete(fh)
 	return 0
 }
 
 // Rename will rename or move oldpath to newpath
 func (f *fuseImpl) Rename(oldpath string, newpath string) int {
-	dlog.Debugf(f.ctx, "Rename(%s, %s)", oldpath, newpath)
+	log.Debugf("Rename(%s, %s)", oldpath, newpath)
 	if oldpath == newpath {
 		return 0
 	}
@@ -387,7 +364,7 @@ func (f *fuseImpl) Rename(oldpath string, newpath string) int {
 
 // Rmdir removes the directory at path. The directory must be empty
 func (f *fuseImpl) Rmdir(path string) int {
-	dlog.Debugf(f.ctx, "Rmdir(%s)", path)
+	log.Debugf("Rmdir(%s)", path)
 	return f.errToFuseErr(f.withConn(func(conn *ftp.ServerConn) error {
 		if err := conn.RemoveDir(relpath(path)); err != nil {
 			return err
@@ -400,7 +377,7 @@ func (f *fuseImpl) Rmdir(path string) int {
 // Truncate will truncate the given file to a certain size using a STOR command
 // with zero bytes and an offset. This behavior will only work with some servers.
 func (f *fuseImpl) Truncate(path string, size int64, fh uint64) int {
-	dlog.Debugf(f.ctx, "Truncate(%s, sz=%d, %d)", path, size, fh)
+	log.Debugf("Truncate(%s, sz=%d, %d)", path, size, fh)
 	var fe *info
 	var errCode int
 	if fh == math.MaxUint64 {
@@ -420,7 +397,7 @@ func (f *fuseImpl) Truncate(path string, size int64, fh uint64) int {
 
 // Unlink will remove the path from the file system.
 func (f *fuseImpl) Unlink(path string) int {
-	dlog.Debugf(f.ctx, "Unlink(%s)", path)
+	log.Debugf("Unlink(%s)", path)
 	return f.errToFuseErr(f.withConn(func(conn *ftp.ServerConn) error {
 		if err := conn.Delete(relpath(path)); err != nil {
 			return err
@@ -434,8 +411,7 @@ func (f *fuseImpl) Unlink(path string) int {
 // data connection that is established to facilitate the write will remain open
 // until the handle is released by a call to Release
 func (f *fuseImpl) Write(path string, buf []byte, ofst int64, fh uint64) int {
-	defer f.logPanic()
-	// dlog.Debugf(f.ctx, "Write(%s, sz=%d, off=%d, %d)", path, len(buf), ofst, fh)
+	log.Debugf("Write(%s, sz=%d, off=%d, %d)", path, len(buf), ofst, fh)
 	fe, errCode := f.loadHandle(fh)
 	if errCode < 0 {
 		return errCode
@@ -450,10 +426,10 @@ func (f *fuseImpl) Write(path string, buf []byte, ofst int64, fh uint64) int {
 		go func() {
 			defer func() {
 				fe.wg.Done()
-				f.pool.put(f.ctx, conn)
+				f.pool.put(conn)
 			}()
 			if err := conn.StorFrom(relpath(path), reader, of); err != nil {
-				dlog.Errorf(f.ctx, "error storing: %v", err)
+				log.Errorf("error storing: %v", err)
 			}
 		}()
 	}
@@ -461,7 +437,7 @@ func (f *fuseImpl) Write(path string, buf []byte, ofst int64, fh uint64) int {
 	// A connection dedicated to the Write function is needed because there
 	// might be simultaneous Read and Write operations on the same file handle.
 	if fe.writer == nil {
-		conn, err := f.pool.get(f.ctx)
+		conn, err := f.pool.get()
 		if errCode = f.errToFuseErr(err); errCode < 0 {
 			return errCode
 		}
@@ -471,7 +447,7 @@ func (f *fuseImpl) Write(path string, buf []byte, ofst int64, fh uint64) int {
 		pipeCopy(conn, of)
 	} else if fe.wof != of {
 		// Drain and restart the write operation.
-		fe.writer.Close()
+		_ = fe.writer.Close()
 		fe.wg.Wait()
 		pipeCopy(fe.conn, of)
 	}
@@ -505,7 +481,7 @@ func (f *fuseImpl) clearPath(p string) {
 		f.Lock()
 		delete(f.current, fe.fh)
 		f.Unlock()
-		f.pool.put(f.ctx, fe.conn)
+		f.pool.put(fe.conn)
 	}
 }
 
@@ -518,7 +494,7 @@ func (f *fuseImpl) delete(fh uint64) {
 		f.Lock()
 		delete(f.current, fe.fh)
 		f.Unlock()
-		f.pool.put(f.ctx, fe.conn)
+		f.pool.put(fe.conn)
 	}
 }
 
@@ -566,9 +542,6 @@ func (f *fuseImpl) errToFuseErr(err error) int {
 	case strings.Contains(em, errConnRefused):
 		return -fuse.ECONNREFUSED
 	case strings.Contains(em, errIOTimeout):
-		buf := make([]byte, 0x10000)
-		n := runtime.Stack(buf, false)
-		fmt.Fprintf(dlog.StdLogger(f.ctx, dlog.MaxLogLevel(f.ctx)).Writer(), "%T %v\n%s", err, err, string(buf[:n]))
 		return -fuse.ETIMEDOUT
 	case strings.Contains(em, errFileExists):
 		return -fuse.EEXIST
@@ -576,7 +549,7 @@ func (f *fuseImpl) errToFuseErr(err error) int {
 		// TODO
 		buf := make([]byte, 0x10000)
 		n := runtime.Stack(buf, false)
-		fmt.Fprintf(dlog.StdLogger(f.ctx, dlog.MaxLogLevel(f.ctx)).Writer(), "%T %v\n%s", err, err, string(buf[:n]))
+		log.Printf("%T %v\n%s", err, err, string(buf[:n]))
 		return -fuse.EIO
 	}
 }
@@ -618,7 +591,7 @@ func (f *fuseImpl) openHandle(path string, create, append bool) (nfe *info, e *f
 	if shuttingDown {
 		return nil, nil, -fuse.ECANCELED
 	}
-	conn, err := f.pool.get(f.ctx)
+	conn, err := f.pool.get()
 	ec := f.errToFuseErr(err)
 	if ec < 0 {
 		return nil, nil, ec
@@ -626,7 +599,7 @@ func (f *fuseImpl) openHandle(path string, create, append bool) (nfe *info, e *f
 
 	defer func() {
 		if errCode != 0 {
-			f.pool.put(f.ctx, conn)
+			f.pool.put(conn)
 		}
 	}()
 
@@ -664,12 +637,12 @@ func (f *fuseImpl) openHandle(path string, create, append bool) (nfe *info, e *f
 }
 
 func (f *fuseImpl) withConn(fn func(conn *ftp.ServerConn) error) error {
-	conn, err := f.pool.get(f.ctx)
+	conn, err := f.pool.get()
 	if err != nil {
 		return err
 	}
 	err = fn(conn)
-	f.pool.put(f.ctx, conn)
+	f.pool.put(conn)
 	return err
 }
 

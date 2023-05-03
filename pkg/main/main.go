@@ -18,7 +18,6 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 
-	"github.com/datawire/dlib/dlog"
 	"github.com/datawire/go-fuseftp/pkg/fs"
 	"github.com/datawire/go-fuseftp/rpc"
 )
@@ -54,15 +53,13 @@ func addrPort(ap *rpc.AddressAndPort) (netip.AddrPort, error) {
 }
 
 func (s *service) Mount(_ context.Context, rq *rpc.MountRequest) (*rpc.MountIdentifier, error) {
-	logger := logrus.New()
 	if rq.LogLevel != "" {
 		lvl, err := logrus.ParseLevel(rq.LogLevel)
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
-		logger.SetLevel(lvl)
+		logrus.SetLevel(lvl)
 	}
-	ctx := dlog.WithLogger(s.ctx, dlog.WrapLogrus(logger))
 
 	s.Lock()
 	defer s.Unlock()
@@ -77,7 +74,7 @@ func (s *service) Mount(_ context.Context, rq *rpc.MountRequest) (*rpc.MountIden
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(s.ctx)
 	fi, err := fs.NewFTPClient(ctx, ap, rq.Directory, rq.ReadTimeout.AsDuration())
 	if err != nil {
 		cancel()
@@ -127,7 +124,7 @@ func (s *service) SetFtpServer(_ context.Context, rq *rpc.SetFtpServerRequest) (
 	if err != nil {
 		return nil, err
 	}
-	if err = m.ftpClient.SetAddress(s.ctx, ap); err != nil {
+	if err = m.ftpClient.SetAddress(ap); err != nil {
 		return nil, err
 	}
 	return &emptypb.Empty{}, err
