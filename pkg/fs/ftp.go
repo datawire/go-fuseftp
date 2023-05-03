@@ -76,7 +76,10 @@ type info struct {
 	// Current offset for write operations.
 	wof uint64
 
-	// The writer is the writer side of a io.Pipe() used when writing data to a remote file.
+	// The Entry from the ftp server with estimated size based on initial size and write/truncate operations
+	entry ftp.Entry
+
+	// The writer is the writer side of an io.Pipe() used when writing data to a remote file.
 	writer io.WriteCloser
 
 	// 1 is added to this wg when the reader/writer pipe is created. Wait for it when closing the writer.
@@ -389,8 +392,12 @@ func (f *fuseImpl) Truncate(path string, size int64, fh uint64) int {
 	if errCode < 0 {
 		return errCode
 	}
-	if errCode = f.errToFuseErr(fe.conn.StorFrom(relpath(path), bytes.NewReader(nil), uint64(size))); errCode < 0 {
+	sz := uint64(size)
+	if errCode = f.errToFuseErr(fe.conn.StorFrom(relpath(path), bytes.NewReader(nil), sz)); errCode < 0 {
 		return errCode
+	}
+	if sz < fe.entry.Size {
+		fe.entry.Size = sz
 	}
 	return 0
 }
@@ -456,6 +463,9 @@ func (f *fuseImpl) Write(path string, buf []byte, ofst int64, fh uint64) int {
 		n = errCode
 	} else {
 		fe.wof += uint64(n)
+		if fe.wof > fe.entry.Size {
+			fe.entry.Size = fe.wof
+		}
 	}
 	return n
 }
@@ -555,6 +565,14 @@ func (f *fuseImpl) errToFuseErr(err error) int {
 }
 
 func (f *fuseImpl) getEntry(path string) (e *ftp.Entry, fuseErr int) {
+	f.RLock()
+	for _, fe := range f.current {
+		if fe.path == path {
+			f.RUnlock()
+			return &fe.entry, 0
+		}
+	}
+	f.RUnlock()
 	err := f.withConn(func(conn *ftp.ServerConn) error {
 		var err error
 		e, err = conn.GetEntry(relpath(path))
@@ -570,8 +588,7 @@ func (f *fuseImpl) loadEntry(fh uint64) (*ftp.Entry, int) {
 	if !ok {
 		return nil, -fuse.ENOENT
 	}
-	e, err := fe.conn.GetEntry(relpath(fe.path))
-	return e, f.errToFuseErr(err)
+	return &fe.entry, 0
 }
 
 func (f *fuseImpl) loadHandle(fh uint64) (*info, int) {
@@ -625,6 +642,7 @@ func (f *fuseImpl) openHandle(path string, create, append bool) (nfe *info, e *f
 		path:     path,
 		fh:       f.nextHandle,
 		conn:     conn,
+		entry:    *e,
 	}
 	if append {
 		nfe.wof = e.Size
