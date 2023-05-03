@@ -18,8 +18,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -28,7 +26,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/datawire/dlib/dlog"
 	server "github.com/datawire/go-ftpserver"
 )
 
@@ -43,104 +40,9 @@ func TestMain(m *testing.M) {
 	m.Run()
 }
 
-type tbWrapper struct {
-	testing.TB
-	level  dlog.LogLevel
-	fields map[string]any
-}
-
-type tbWriter struct {
-	*tbWrapper
-	l dlog.LogLevel
-}
-
-func (w *tbWriter) Write(data []byte) (n int, err error) {
-	w.Helper()
-	w.Log(w.l, strings.TrimSuffix(string(data), "\n")) // strip trailing newline if present, since the Log() call appends a newline
-	return len(data), nil
-}
-
-func NewTestLogger(t testing.TB, level dlog.LogLevel) dlog.Logger {
-	return &tbWrapper{TB: t, level: level}
-}
-
-func (w *tbWrapper) StdLogger(l dlog.LogLevel) *log.Logger {
-	return log.New(&tbWriter{tbWrapper: w, l: l}, "", 0)
-}
-
-func (w *tbWrapper) WithField(key string, value any) dlog.Logger {
-	ret := tbWrapper{
-		TB:     w.TB,
-		fields: make(map[string]any, len(w.fields)+1),
-	}
-	for k, v := range w.fields {
-		ret.fields[k] = v
-	}
-	ret.fields[key] = value
-	return &ret
-}
-
-func (w *tbWrapper) Log(level dlog.LogLevel, msg string) {
-	if level > w.level {
-		return
-	}
-	w.Helper()
-	w.UnformattedLog(level, msg)
-}
-
-func (w *tbWrapper) MaxLevel() dlog.LogLevel {
-	return w.level
-}
-
-func (w *tbWrapper) UnformattedLog(level dlog.LogLevel, args ...any) {
-	if level > w.level {
-		return
-	}
-	w.Helper()
-	sb := strings.Builder{}
-	sb.WriteString(time.Now().Format("15:04:05.0000"))
-	for _, arg := range args {
-		sb.WriteString(" ")
-		fmt.Fprint(&sb, arg)
-	}
-
-	if len(w.fields) > 0 {
-		parts := make([]string, 0, len(w.fields))
-		for k := range w.fields {
-			parts = append(parts, k)
-		}
-		sort.Strings(parts)
-
-		for i, k := range parts {
-			if i > 0 {
-				sb.WriteString(" ")
-			}
-			fmt.Fprintf(&sb, "%s=%#v", k, w.fields[k])
-		}
-	}
-	w.TB.Log(sb.String())
-}
-
-func (w *tbWrapper) UnformattedLogf(level dlog.LogLevel, format string, args ...any) {
-	if level > w.level {
-		return
-	}
-	w.Helper()
-	w.UnformattedLog(level, fmt.Sprintf(format, args...))
-}
-
-func (w *tbWrapper) UnformattedLogln(level dlog.LogLevel, args ...any) {
-	if level > w.level {
-		return
-	}
-	w.Helper()
-	w.UnformattedLog(level, fmt.Sprintln(args...))
-}
-
 func testContext(t *testing.T) context.Context {
-	lr := logrus.New()
-	lr.Level = logrus.InfoLevel
-	lr.SetFormatter(&logrus.TextFormatter{
+	logrus.SetLevel(logrus.InfoLevel)
+	logrus.SetFormatter(&logrus.TextFormatter{
 		ForceColors:               false,
 		DisableColors:             true,
 		ForceQuote:                false,
@@ -157,7 +59,7 @@ func testContext(t *testing.T) context.Context {
 		FieldMap:                  nil,
 		CallerPrettyfier:          nil,
 	})
-	return dlog.WithLogger(context.Background(), dlog.WrapLogrus(lr))
+	return context.Background()
 }
 
 const remoteDir = "exported"
@@ -332,7 +234,7 @@ func TestBrokenConnection(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(root, "test1.txt"), contents, 0644))
 
 		// Assign the new address to the FTP client (it should now quit all connections and reconnect)
-		require.NoError(t, fsh.SetAddress(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port))))
+		require.NoError(t, fsh.SetAddress(netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port))))
 
 		// Ensure that the connection is restored
 		test1Mounted, err = os.ReadFile(filepath.Join(mountPoint, "test1.txt"))

@@ -8,9 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
-
-	"github.com/datawire/dlib/dlog"
 )
 
 func (fh *FuseHost) detectFuseStarted(ctx context.Context, started chan error) {
@@ -42,7 +41,7 @@ func (fh *FuseHost) detectFuseStarted(ctx context.Context, started chan error) {
 			var mountSt unix.Stat_t
 			if err := unix.Stat(fh.mountPoint, &mountSt); err != nil {
 				// we don't consider a failure to stat an error here, just a cause for a retry.
-				dlog.Debugf(ctx, "unable to stat mount point %q: %v", fh.mountPoint, err)
+				logrus.Debugf("unable to stat mount point %q: %v", fh.mountPoint, err)
 			} else {
 				if st.Ino != mountSt.Ino || st.Dev != mountSt.Dev {
 					return
