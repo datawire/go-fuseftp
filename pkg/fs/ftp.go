@@ -641,19 +641,20 @@ func (f *fuseImpl) openHandle(path string, create, append bool) (nfe *info, e *f
 		}
 	}
 
+	f.Lock()
+	fh := f.nextHandle
+	f.nextHandle++
 	nfe = &info{
 		fuseImpl: f,
 		path:     path,
-		fh:       f.nextHandle,
+		fh:       fh,
 		conn:     conn,
 		entry:    *e,
 	}
 	if append {
 		nfe.wof = e.Size
 	}
-	f.Lock()
-	f.current[f.nextHandle] = nfe
-	f.nextHandle++
+	f.current[fh] = nfe
 	f.Unlock()
 	return nfe, e, 0
 }
