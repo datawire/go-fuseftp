@@ -45,7 +45,7 @@ fuseftp: $(BIN_OUTPUT)/fuseftp-$(GOOS)-$(GOARCH)$(EXE)
 
 $(BIN_OUTPUT)/fuseftp-$(GOOS)-$(GOARCH)$(EXE): rpc/fuseftp.pb.go rpc/fuseftp.grpc_pb.go $(wildcard pkg/fs/*.go) $(wildcard pkg/main/*.go)
 	mkdir -p $(BIN_OUTPUT)
-	go build -o $@ ./pkg/main/...
+	go build -trimpath -o $@ ./pkg/main/...
 
 %.out.html: %.out
 	go tool cover -html=$< -o=$@
