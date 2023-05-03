@@ -414,8 +414,31 @@ func (f *fuseImpl) Unlink(path string) int {
 	}))
 }
 
-// Write writes the gven data to a file at the given offset in that file. The
-// data connection that is established to facilitate the write will remain open
+func (i *info) pipeCopy(of uint64) int {
+	// A connection dedicated to the Write function is needed because there
+	// might be simultaneous Read and Write operations on the same file handle.
+	conn, err := i.pool.get()
+	if errCode := i.errToFuseErr(err); errCode < 0 {
+		return errCode
+	}
+	i.wof = of
+	var reader io.ReadCloser
+	reader, i.writer = io.Pipe()
+	i.wg.Add(1)
+	go func() {
+		defer func() {
+			i.wg.Done()
+			i.pool.put(conn)
+		}()
+		if err := conn.StorFrom(relpath(i.path), reader, of); err != nil {
+			log.Errorf("error storing: %v", err)
+		}
+	}()
+	return 0
+}
+
+// Write writes the given data to a file at the given offset in that file. The data
+// connection that is established to facilitate the data transfer will remain open
 // until the handle is released by a call to Release
 func (f *fuseImpl) Write(path string, buf []byte, ofst int64, fh uint64) int {
 	log.Debugf("Write(%s, sz=%d, off=%d, %d)", path, len(buf), ofst, fh)
@@ -425,38 +448,19 @@ func (f *fuseImpl) Write(path string, buf []byte, ofst int64, fh uint64) int {
 	}
 	of := uint64(ofst)
 
-	pipeCopy := func(conn *ftp.ServerConn, of uint64) {
-		fe.wof = of
-		var reader io.ReadCloser
-		reader, fe.writer = io.Pipe()
-		fe.wg.Add(1)
-		go func() {
-			defer func() {
-				fe.wg.Done()
-				f.pool.put(conn)
-			}()
-			if err := conn.StorFrom(relpath(path), reader, of); err != nil {
-				log.Errorf("error storing: %v", err)
-			}
-		}()
-	}
-
-	// A connection dedicated to the Write function is needed because there
-	// might be simultaneous Read and Write operations on the same file handle.
+	var ec int
 	if fe.writer == nil {
-		conn, err := f.pool.get()
-		if errCode = f.errToFuseErr(err); errCode < 0 {
-			return errCode
-		}
-
 		// start the pipe pumper. It ends when the fe.writer closes. That
 		// happens when Release is called
-		pipeCopy(conn, of)
+		ec = fe.pipeCopy(of)
 	} else if fe.wof != of {
 		// Drain and restart the write operation.
 		_ = fe.writer.Close()
 		fe.wg.Wait()
-		pipeCopy(fe.conn, of)
+		ec = fe.pipeCopy(of)
+	}
+	if ec != 0 {
+		return ec
 	}
 	n, err := fe.writer.Write(buf)
 	if errCode = f.errToFuseErr(err); errCode < 0 {
