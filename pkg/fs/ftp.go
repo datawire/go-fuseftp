@@ -197,6 +197,12 @@ func (f *fuseImpl) Flush(path string, fh uint64) int {
 // UID and GID of the caller. File mode is always 0644 and Directory
 // mode is always 0755.
 func (f *fuseImpl) Getattr(path string, s *fuse.Stat_t, fh uint64) int {
+	if runtime.GOOS == "darwin" {
+		fn := filepath.Base(path)
+		if fn == ".DS_Store" || strings.HasPrefix("._", fn) {
+			return -fuse.ENOENT
+		}
+	}
 	log.Debugf("Getattr(%s, %d)", path, fh)
 	var e *ftp.Entry
 	var errCode int
