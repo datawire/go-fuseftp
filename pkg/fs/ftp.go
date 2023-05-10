@@ -148,7 +148,7 @@ func (f *fuseImpl) SetAddress(addr netip.AddrPort) error {
 // The third argument, the mode bits, are currently ignored
 func (f *fuseImpl) Create(path string, flags int, _ uint32) (int, uint64) {
 	log.Debugf("Create(%s, %#x)", path, flags)
-	fe, _, errCode := f.openHandle(path, true, flags&os.O_APPEND == os.O_APPEND)
+	fe, _, errCode := f.openHandle(path, flags|fuse.O_CREAT)
 	if errCode < 0 {
 		return errCode, 0
 	}
@@ -229,6 +229,12 @@ func (f *fuseImpl) Mkdir(path string, mode uint32) int {
 	err := f.withConn(func(conn *ftp.ServerConn) error {
 		return conn.MakeDir(relpath(path))
 	})
+	var tpe *textproto.Error
+	if errors.As(err, &tpe) && tpe.Code == ftp.StatusFileUnavailable {
+		if _, ec := f.getEntry(path); ec == 0 {
+			return -fuse.EEXIST
+		}
+	}
 	return f.errToFuseErr(err)
 }
 
@@ -236,7 +242,7 @@ func (f *fuseImpl) Mkdir(path string, mode uint32) int {
 // a file of size zero can be created in the server.
 func (f *fuseImpl) Open(path string, flags int) (int, uint64) {
 	log.Debugf("Open(%s, %#x)", path, flags)
-	fe, _, errCode := f.openHandle(path, flags&os.O_CREATE == os.O_CREATE, flags&os.O_APPEND == os.O_APPEND)
+	fe, _, errCode := f.openHandle(path, flags)
 	if errCode < 0 {
 		return errCode, 0
 	}
@@ -247,7 +253,7 @@ func (f *fuseImpl) Open(path string, flags int) (int, uint64) {
 // Opendir is like Open but will fail unless the path represents a directory
 func (f *fuseImpl) Opendir(path string) (int, uint64) {
 	log.Debugf("Opendir(%s)", path)
-	fe, e, errCode := f.openHandle(path, false, false)
+	fe, e, errCode := f.openHandle(path, fuse.O_RDONLY)
 	if errCode < 0 {
 		return errCode, 0
 	}
@@ -322,7 +328,7 @@ func (f *fuseImpl) Readdir(path string, fill func(name string, stat *fuse.Stat_t
 	var fe *info
 	var errCode int
 	if fh == math.MaxUint64 {
-		fe, _, errCode = f.openHandle(path, false, false)
+		fe, _, errCode = f.openHandle(path, fuse.O_RDONLY)
 		defer f.delete(fe.fh)
 	} else {
 		fe, errCode = f.loadHandle(fh)
@@ -374,13 +380,35 @@ func (f *fuseImpl) Rename(oldpath string, newpath string) int {
 // Rmdir removes the directory at path. The directory must be empty
 func (f *fuseImpl) Rmdir(path string) int {
 	log.Debugf("Rmdir(%s)", path)
-	return f.errToFuseErr(f.withConn(func(conn *ftp.ServerConn) error {
+	err := f.withConn(func(conn *ftp.ServerConn) error {
+		e, err := conn.GetEntry(relpath(path))
+		if err != nil {
+			return err
+		}
+		if e.Type != ftp.EntryTypeFolder {
+			return &fs.PathError{
+				Op:   "rmdir",
+				Path: path,
+				Err: &textproto.Error{
+					Code: ftp.StatusFile,
+					Msg:  "not a directory",
+				},
+			}
+		}
 		if err := conn.RemoveDir(relpath(path)); err != nil {
 			return err
 		}
 		f.clearPath(path)
 		return nil
-	}))
+	})
+	var tpe *textproto.Error
+	if errors.As(err, &tpe) && tpe.Code == ftp.StatusFileUnavailable {
+		log.Debugf("%s is unavailable", path)
+		if _, ec := f.getEntry(path); ec == 0 {
+			return -fuse.ENOTEMPTY
+		}
+	}
+	return f.errToFuseErr(err)
 }
 
 // Truncate will truncate the given file to a certain size using a STOR command
@@ -390,7 +418,7 @@ func (f *fuseImpl) Truncate(path string, size int64, fh uint64) int {
 	var fe *info
 	var errCode int
 	if fh == math.MaxUint64 {
-		fe, _, errCode = f.openHandle(path, false, false)
+		fe, _, errCode = f.openHandle(path, fuse.O_WRONLY)
 		defer f.delete(fe.fh)
 	} else {
 		fe, errCode = f.loadHandle(fh)
@@ -613,7 +641,7 @@ func (f *fuseImpl) loadHandle(fh uint64) (*info, int) {
 	return fe, 0
 }
 
-func (f *fuseImpl) openHandle(path string, create, append bool) (nfe *info, e *ftp.Entry, errCode int) {
+func (f *fuseImpl) openHandle(path string, flags int) (nfe *info, e *ftp.Entry, errCode int) {
 	f.RLock()
 	shuttingDown := f.shuttingDown
 	f.RUnlock()
@@ -634,7 +662,7 @@ func (f *fuseImpl) openHandle(path string, create, append bool) (nfe *info, e *f
 
 	if e, err = conn.GetEntry(relpath(path)); err != nil {
 		errCode = f.errToFuseErr(err)
-		if !(create && errCode == -fuse.ENOENT) {
+		if !(flags&fuse.O_CREAT == fuse.O_CREAT && errCode == -fuse.ENOENT) {
 			return nil, nil, errCode
 		}
 
@@ -646,6 +674,10 @@ func (f *fuseImpl) openHandle(path string, create, append bool) (nfe *info, e *f
 			Name: filepath.Base(path),
 			Type: ftp.EntryTypeFile,
 			Time: time.Now(),
+		}
+	} else {
+		if flags&(fuse.O_RDWR|fuse.O_WRONLY) != 0 && e.Type == ftp.EntryTypeFolder {
+			return nil, nil, -fuse.EISDIR
 		}
 	}
 
@@ -659,7 +691,7 @@ func (f *fuseImpl) openHandle(path string, create, append bool) (nfe *info, e *f
 		conn:     conn,
 		entry:    *e,
 	}
-	if append {
+	if flags&fuse.O_APPEND == fuse.O_APPEND {
 		nfe.wof = e.Size
 	}
 	f.current[fh] = nfe
