@@ -543,6 +543,8 @@ func (f *fuseImpl) errToFuseErr(err error) int {
 			return -fuse.EHOSTUNREACH
 		case ftp.StatusBadFileName:
 			return -fuse.EINVAL
+		case ftp.StatusFileUnavailable:
+			return -fuse.ENOENT
 		}
 	}
 	em := err.Error()
