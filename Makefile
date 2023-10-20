@@ -59,10 +59,14 @@ GOHOSTOS ?= $(shell go env GOHOSTOS)
 
 # Install protoc and friends under tools/bin.
 PROTOC_VERSION=21.5
+PROTOC_URL=https://github.com/protocolbuffers/protobuf/releases/download/v
 ifeq ($(GOHOSTARCH),arm64)
   PROTOC_ARCH=aarch_64
 else ifeq ($(GOHOSTARCH),amd64)
   PROTOC_ARCH=x86_64
+else ifeq ($(GOHOSTARCH),loong64)
+  PROTOC_ARCH=loong64
+  PROTOC_URL=https://github.com/Loongson-Cloud-Community/protobuf/releases/download/v
 else
   PROTOC_ARCH=$(GOHOSTARCH)
 endif
@@ -75,7 +79,7 @@ endif
 PROTOC_ZIP=protoc-$(PROTOC_VERSION)-$(PROTOC_OS_ARCH).zip
 tools/$(PROTOC_ZIP):
 	mkdir -p $(@D)
-	curl -sfL https://github.com/protocolbuffers/protobuf/releases/download/v$(PROTOC_VERSION)/$(PROTOC_ZIP) -o $@
+	curl -sfL $(PROTOC_URL)$(PROTOC_VERSION)/$(PROTOC_ZIP) -o $@
 
 %/bin/protoc$(EXE) %/include %/readme.txt: %/$(PROTOC_ZIP)
 	cd $* && unzip -q -o -DD $(<F)
