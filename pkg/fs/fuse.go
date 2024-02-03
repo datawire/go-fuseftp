@@ -29,14 +29,16 @@ func NewHost(fsh fuse.FileSystemInterface, mountPoint string) *FuseHost {
 
 // Start will mount the filesystem on the mountPoint passed to NewHost.
 func (fh *FuseHost) Start(ctx context.Context, startTimeout time.Duration) error {
-	ctx, cancel := context.WithCancel(ctx)
-	fh.cancel = cancel
+	ctx, fh.cancel = context.WithCancel(ctx)
 
 	opts := []string{
 		"-o", "default_permissions",
 		"-o", "auto_cache",
 		"-o", "sync_read",
 		"-o", "allow_root",
+	}
+	if logrus.GetLevel() >= logrus.DebugLevel {
+		opts = append(opts, "-o", "debug")
 	}
 	if runtime.GOOS == "windows" {
 		// WinFsp requires this to create files with the same
@@ -47,9 +49,6 @@ func (fh *FuseHost) Start(ctx context.Context, startTimeout time.Duration) error
 	startCtx, startCancel := context.WithTimeout(ctx, startTimeout)
 	defer startCancel()
 	go fh.detectFuseStarted(startCtx, started)
-	if logrus.GetLevel() >= logrus.DebugLevel {
-		opts = append(opts, "-o", "debug")
-	}
 
 	mCh := make(chan bool, 1)
 	fh.wg.Add(1)
