@@ -13,6 +13,7 @@ import (
 )
 
 func (fh *FuseHost) detectFuseStarted(ctx context.Context, started chan error) {
+	time.Sleep(100 * time.Millisecond)
 	var st unix.Stat_t
 	if err := unix.Stat(fh.mountPoint, &st); err != nil {
 		select {
