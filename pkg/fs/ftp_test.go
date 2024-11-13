@@ -41,7 +41,7 @@ func TestMain(m *testing.M) {
 }
 
 func testContext(t *testing.T) context.Context {
-	logrus.SetLevel(logrus.InfoLevel)
+	logrus.SetLevel(logrus.DebugLevel)
 	logrus.SetFormatter(&logrus.TextFormatter{
 		ForceColors:               false,
 		DisableColors:             true,
@@ -135,11 +135,11 @@ func TestHelperFTPServer(t *testing.T) {
 	logrus.Info("over and out")
 }
 
-func startFUSEHost(t *testing.T, ctx context.Context, port uint16, dir string) (FTPClient, *FuseHost, string) {
+func startFUSEHost(t *testing.T, ctx context.Context, port uint16, dir string, readOnly bool) (FTPClient, *FuseHost, string) {
 	// Start the client
 	dir = filepath.Join(dir, "mount")
 	require.NoError(t, os.Mkdir(dir, 0755))
-	fsh, err := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), remoteDir, 60*time.Second)
+	fsh, err := NewFTPClient(ctx, netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)), remoteDir, readOnly, 60*time.Second)
 	require.NoError(t, err)
 	mp := dir
 	if runtime.GOOS == "windows" {
@@ -153,7 +153,7 @@ func startFUSEHost(t *testing.T, ctx context.Context, port uint16, dir string) (
 
 func TestConnectFailure(t *testing.T) {
 	ctx := testContext(t)
-	_, err := NewFTPClient(ctx, netip.MustParseAddrPort("198.51.100.32:21"), "", time.Second)
+	_, err := NewFTPClient(ctx, netip.MustParseAddrPort("198.51.100.32:21"), "", false, time.Second)
 	require.Error(t, err)
 }
 
@@ -168,7 +168,7 @@ func TestBrokenConnection(t *testing.T) {
 	root, port := startFTPServer(t, serverCtx, tmp, &wg)
 	require.NotEqual(t, uint16(0), port)
 
-	fsh, host, mountPoint := startFUSEHost(t, ctx, port, tmp)
+	fsh, host, mountPoint := startFUSEHost(t, ctx, port, tmp, false)
 	defer func() {
 		cancel()
 		host.Stop()
@@ -243,6 +243,15 @@ func TestBrokenConnection(t *testing.T) {
 	})
 }
 
+func hasName(es []fs2.DirEntry, n string) bool {
+	for _, e := range es {
+		if e.Name() == n {
+			return true
+		}
+	}
+	return false
+}
+
 func TestConnectedToServer(t *testing.T) {
 	ctx, cancel := context.WithCancel(testContext(t))
 
@@ -251,7 +260,7 @@ func TestConnectedToServer(t *testing.T) {
 	root, port := startFTPServer(t, ctx, tmp, &wg)
 	require.NotEqual(t, uint16(0), port)
 
-	fsh, host, mountPoint := startFUSEHost(t, ctx, port, tmp)
+	fsh, host, mountPoint := startFUSEHost(t, ctx, port, tmp, false)
 	t.Cleanup(func() {
 		host.Stop()
 		cancel()
@@ -378,15 +387,6 @@ func TestConnectedToServer(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	hasName := func(es []fs2.DirEntry, n string) bool {
-		for _, e := range es {
-			if e.Name() == n {
-				return true
-			}
-		}
-		return false
-	}
-
 	t.Run("ReadDir", func(t *testing.T) {
 		es, err := os.ReadDir(filepath.Join(mountPoint, "a", "b"))
 		require.NoError(t, err)
@@ -496,6 +496,156 @@ func TestConnectedToServer(t *testing.T) {
 	})
 }
 
+func TestConnectedToServerReadOnly(t *testing.T) {
+	ctx, cancel := context.WithCancel(testContext(t))
+
+	wg := sync.WaitGroup{}
+	tmp := t.TempDir()
+	root, port := startFTPServer(t, ctx, tmp, &wg)
+	require.NotEqual(t, uint16(0), port)
+
+	fsh, host, mountPoint := startFUSEHost(t, ctx, port, tmp, true)
+	t.Cleanup(func() {
+		host.Stop()
+		cancel()
+		wg.Wait()
+	})
+
+	// Create a file on the server side
+	const contentSize = 1024 * 1024 * 20
+	testContents := make([]byte, contentSize)
+	for i := 0; i < contentSize; i++ {
+		testContents[i] = byte(i & 0xff)
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(root, "test1.txt"), testContents, 0o644))
+	require.NoError(t, os.Mkdir(filepath.Join(root, "a"), 0o755))
+	require.NoError(t, os.Mkdir(filepath.Join(root, "a", "b"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a", "b", "test1.txt"), testContents, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a", "b", "test2.txt"), testContents, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a", "test3.txt"), testContents, 0o644))
+
+	t.Run("Read", func(t *testing.T) {
+		test1Mounted, err := os.ReadFile(filepath.Join(mountPoint, "test1.txt"))
+		require.NoError(t, err)
+		assert.True(t, bytes.Equal(testContents, test1Mounted))
+	})
+
+	t.Run("Read non-existing", func(t *testing.T) {
+		_, err := os.ReadFile(filepath.Join(mountPoint, "nosuchfile.txt"))
+		require.ErrorIs(t, err, fs2.ErrNotExist)
+	})
+
+	t.Run("Write", func(t *testing.T) {
+		// Write a file to the mounted directory
+		require.Error(t, os.WriteFile(filepath.Join(mountPoint, "test2.txt"), testContents, 0644))
+	})
+
+	t.Run("Write non-existing", func(t *testing.T) {
+		// Write a file to the mounted directory
+		err := os.WriteFile(filepath.Join(mountPoint, "nodir", "test2.txt"), testContents, 0644)
+		require.ErrorIs(t, err, fs2.ErrNotExist)
+	})
+
+	t.Run("MkdirAll", func(t *testing.T) {
+		// Make directories in the mounted directory
+		err := os.MkdirAll(filepath.Join(mountPoint, "a", "c"), 0755)
+		require.Error(t, err)
+	})
+
+	t.Run("Create", func(t *testing.T) {
+		_, err := os.Create(filepath.Join(mountPoint, "a", "test3.txt"))
+		require.Error(t, err)
+	})
+
+	t.Run("CreateTmp", func(t *testing.T) {
+		_, err := os.CreateTemp(mountPoint, "test-*.txt")
+		require.Error(t, err)
+	})
+
+	t.Run("Create dir-exists", func(t *testing.T) {
+		_, err := os.Create(filepath.Join(mountPoint, "a", "b"))
+		require.Error(t, err)
+	})
+
+	t.Run("Create no-such-dir", func(t *testing.T) {
+		_, err := os.Create(filepath.Join(mountPoint, "b", "test3.txt"))
+		require.Error(t, err)
+	})
+
+	t.Run("Rename", func(t *testing.T) {
+		// Move test1.txt and test2.txt to a/b in the mounted fs
+		err := os.Rename(filepath.Join(mountPoint, "test1.txt"), filepath.Join(mountPoint, "a", "b", "test1.txt"))
+		require.Error(t, err)
+	})
+
+	t.Run("ReadDir", func(t *testing.T) {
+		es, err := os.ReadDir(filepath.Join(mountPoint, "a", "b"))
+		require.NoError(t, err)
+		require.Len(t, es, 2)
+		assert.True(t, hasName(es, "test1.txt"))
+		assert.True(t, hasName(es, "test2.txt"))
+
+		es, err = os.ReadDir(filepath.Join(mountPoint, "a"))
+		require.NoError(t, err)
+		require.Len(t, es, 2)
+		assert.True(t, hasName(es, "b"))
+		assert.True(t, hasName(es, "test3.txt"))
+		assert.True(t, es[0].IsDir())
+	})
+
+	t.Run("File.ReadDir", func(t *testing.T) {
+		df, err := os.Open(filepath.Join(mountPoint, "a", "b"))
+		require.NoError(t, err)
+		defer df.Close()
+		es, err := df.ReadDir(0)
+		require.NoError(t, err)
+		require.Len(t, es, 2)
+		assert.True(t, hasName(es, "test1.txt"))
+		assert.True(t, hasName(es, "test2.txt"))
+	})
+
+	t.Run("File.ReadDir not-dir", func(t *testing.T) {
+		df, err := os.Open(filepath.Join(mountPoint, "a", "test3.txt"))
+		require.NoError(t, err)
+		defer df.Close()
+		_, err = df.ReadDir(0)
+		notADir := &fs2.PathError{}
+		require.ErrorAs(t, err, &notADir)
+		require.Contains(t, notADir.Error(), errNotDirectory)
+	})
+
+	t.Run("Truncate", func(t *testing.T) {
+		tcf := make([]byte, 0x1500)
+		copy(tcf, testContents)
+		require.NoError(t, os.WriteFile(filepath.Join(root, "trunc1.txt"), tcf, 0644))
+		require.Error(t, os.Truncate(filepath.Join(mountPoint, "trunc1.txt"), 0x1000))
+	})
+
+	t.Run("Remove not-empty-dir", func(t *testing.T) {
+		err := os.Remove(filepath.Join(mountPoint, "a", "b"))
+		require.Error(t, err)
+	})
+
+	t.Run("Remove non-existent", func(t *testing.T) {
+		err := os.Remove(filepath.Join(mountPoint, "a", "nodir"))
+		require.Error(t, err)
+	})
+
+	t.Run("RemoveAll", func(t *testing.T) {
+		err := os.RemoveAll(filepath.Join(mountPoint, "a", "b"))
+		require.Error(t, err)
+	})
+
+	t.Run("MkDir file-exists", func(t *testing.T) {
+		err := os.Mkdir(filepath.Join(mountPoint, "a", "test3.txt"), 0755)
+		require.Error(t, err)
+	})
+
+	t.Run("Release", func(t *testing.T) {
+		require.Equal(t, 0, fsh.(*fuseImpl).cacheSize())
+	})
+}
+
 func TestManyLargeFiles(t *testing.T) {
 	ctx, cancel := context.WithCancel(testContext(t))
 
@@ -524,7 +674,7 @@ func TestManyLargeFiles(t *testing.T) {
 		t.Fatal("failed attempting to create large files")
 	}
 
-	_, host, mountPoint := startFUSEHost(t, ctx, port, tmp)
+	_, host, mountPoint := startFUSEHost(t, ctx, port, tmp, false)
 	stopped := false
 	stopFuse := func() {
 		if !stopped {

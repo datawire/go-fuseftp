@@ -46,6 +46,9 @@ message MountRequest {
   // The mount point on the local computer. Must be a drive letter on windows
   string mount_point = 1;
 
+  // If true, then mount everything read-only
+  bool read_only = 6;
+
   // The ftp_server to connect to
   AddressAndPort ftp_server = 2;
 

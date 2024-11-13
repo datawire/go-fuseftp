@@ -43,6 +43,9 @@ type fuseImpl struct {
 	// current maps file handles to info structs
 	current map[uint64]*info
 
+	// readOnly will prohibit all create, open with write access, and writes when set to true.
+	readOnly bool
+
 	// shuttingDown prevent that new handles are added
 	shuttingDown bool
 }
@@ -111,11 +114,12 @@ type FTPClient interface {
 // NewFTPClient returns an implementation of the fuse.FileSystemInterface that is backed by
 // an FTP server connection tp the address. The dir parameter is the directory that the
 // FTP server changes to when connecting.
-func NewFTPClient(ctx context.Context, addr netip.AddrPort, dir string, readTimeout time.Duration) (FTPClient, error) {
+func NewFTPClient(ctx context.Context, addr netip.AddrPort, dir string, ro bool, readTimeout time.Duration) (FTPClient, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	f := &fuseImpl{
-		cancel:  cancel,
-		current: make(map[uint64]*info),
+		cancel:   cancel,
+		current:  make(map[uint64]*info),
+		readOnly: ro,
 		pool: connPool{
 			dir:     dir,
 			timeout: readTimeout,
@@ -148,6 +152,9 @@ func (f *fuseImpl) SetAddress(addr netip.AddrPort) error {
 // The third argument, the mode bits, are currently ignored
 func (f *fuseImpl) Create(path string, flags int, _ uint32) (int, uint64) {
 	log.Debugf("Create(%s, %#x)", path, flags)
+	if f.readOnly {
+		return -fuse.EROFS, 0
+	}
 	fe, _, errCode := f.openHandle(path, flags|fuse.O_CREAT)
 	if errCode < 0 {
 		return errCode, 0
@@ -213,7 +220,7 @@ func (f *fuseImpl) Getattr(path string, s *fuse.Stat_t, fh uint64) int {
 		e, errCode = f.getEntry(path)
 	}
 	if errCode == 0 {
-		toStat(e, s)
+		toStat(e, s, f.readOnly)
 	}
 	return errCode
 }
@@ -226,6 +233,9 @@ func (f *fuseImpl) Init() {
 
 func (f *fuseImpl) Mkdir(path string, mode uint32) int {
 	log.Debugf("Mkdir(%s, %O)", path, mode)
+	if f.readOnly {
+		return -fuse.EROFS
+	}
 	err := f.withConn(func(conn *ftp.ServerConn) error {
 		return conn.MakeDir(relpath(path))
 	})
@@ -343,7 +353,7 @@ func (f *fuseImpl) Readdir(path string, fill func(name string, stat *fuse.Stat_t
 	}
 	for _, e := range es {
 		s := &fuse.Stat_t{}
-		toStat(e, s)
+		toStat(e, s, f.readOnly)
 		if !fill(e.Name, s, 0) {
 			break
 		}
@@ -368,6 +378,9 @@ func (f *fuseImpl) Releasedir(path string, fh uint64) int {
 // Rename will rename or move oldpath to newpath
 func (f *fuseImpl) Rename(oldpath string, newpath string) int {
 	log.Debugf("Rename(%s, %s)", oldpath, newpath)
+	if f.readOnly {
+		return -fuse.EROFS
+	}
 	if oldpath == newpath {
 		return 0
 	}
@@ -380,6 +393,9 @@ func (f *fuseImpl) Rename(oldpath string, newpath string) int {
 // Rmdir removes the directory at path. The directory must be empty
 func (f *fuseImpl) Rmdir(path string) int {
 	log.Debugf("Rmdir(%s)", path)
+	if f.readOnly {
+		return -fuse.EROFS
+	}
 	err := f.withConn(func(conn *ftp.ServerConn) error {
 		e, err := conn.GetEntry(relpath(path))
 		if err != nil {
@@ -415,6 +431,9 @@ func (f *fuseImpl) Rmdir(path string) int {
 // with zero bytes and an offset. This behavior will only work with some servers.
 func (f *fuseImpl) Truncate(path string, size int64, fh uint64) int {
 	log.Debugf("Truncate(%s, sz=%d, %d)", path, size, fh)
+	if f.readOnly {
+		return -fuse.EROFS
+	}
 	var fe *info
 	var errCode int
 	if fh == math.MaxUint64 {
@@ -439,6 +458,9 @@ func (f *fuseImpl) Truncate(path string, size int64, fh uint64) int {
 // Unlink will remove the path from the file system.
 func (f *fuseImpl) Unlink(path string) int {
 	log.Debugf("Unlink(%s)", path)
+	if f.readOnly {
+		return -fuse.EROFS
+	}
 	return f.errToFuseErr(f.withConn(func(conn *ftp.ServerConn) error {
 		if err := conn.Delete(relpath(path)); err != nil {
 			return err
@@ -476,6 +498,9 @@ func (i *info) pipeCopy(of uint64) int {
 // until the handle is released by a call to Release
 func (f *fuseImpl) Write(path string, buf []byte, ofst int64, fh uint64) int {
 	log.Debugf("Write(%s, sz=%d, off=%d, %d)", path, len(buf), ofst, fh)
+	if f.readOnly {
+		return -fuse.EROFS
+	}
 	fe, errCode := f.loadHandle(fh)
 	if errCode < 0 {
 		return errCode
@@ -597,9 +622,10 @@ func (f *fuseImpl) errToFuseErr(err error) int {
 		return -fuse.EEXIST
 	default:
 		// TODO
-		buf := make([]byte, 0x10000)
-		n := runtime.Stack(buf, false)
-		log.Printf("%T %v\n%s", err, err, string(buf[:n]))
+		// buf := make([]byte, 0x10000)
+		// n := runtime.Stack(buf, false)
+		// log.Printf("%T %v\n%s", err, err, string(buf[:n]))
+		log.Printf("%T, %v\n", err, err)
 		return -fuse.EIO
 	}
 }
@@ -642,6 +668,9 @@ func (f *fuseImpl) loadHandle(fh uint64) (*info, int) {
 }
 
 func (f *fuseImpl) openHandle(path string, flags int) (nfe *info, e *ftp.Entry, errCode int) {
+	if f.readOnly && flags&(fuse.O_CREAT|fuse.O_TRUNC|fuse.O_APPEND|fuse.O_WRONLY|fuse.O_RDWR) != 0 {
+		return nil, nil, -fuse.EROFS
+	}
 	f.RLock()
 	shuttingDown := f.shuttingDown
 	f.RUnlock()
@@ -718,16 +747,22 @@ func containsAny(str string, ss ...string) bool {
 	return false
 }
 
-func toStat(e *ftp.Entry, s *fuse.Stat_t) {
+func toStat(e *ftp.Entry, s *fuse.Stat_t, ro bool) {
 	// TODO: ftp actually returns a line similar to what 'ls -l' produces. It is
 	// possible to parse the mode from that but the client we use here doesn't do that.
 	switch e.Type {
 	case ftp.EntryTypeFolder:
-		s.Mode = fuse.S_IFDIR | 0755
+		s.Mode = fuse.S_IFDIR | 0o555
 	case ftp.EntryTypeLink:
-		s.Mode = fuse.S_IFLNK | 0755
+		s.Mode = fuse.S_IFLNK | 0o555
 	default:
-		s.Mode = fuse.S_IFREG | 0644
+		s.Mode = fuse.S_IFREG | 0o444
+	}
+	if !ro {
+		s.Mode |= 0o200
+		s.Flags = 0
+	} else {
+		s.Flags = fuse.UF_READONLY
 	}
 	tm := fuse.NewTimespec(e.Time)
 	s.Size = int64(e.Size)
@@ -738,5 +773,4 @@ func toStat(e *ftp.Entry, s *fuse.Stat_t) {
 	s.Uid = uint32(os.Getuid())
 	s.Gid = uint32(os.Getgid())
 	s.Nlink = 1
-	s.Flags = 0
 }

@@ -75,7 +75,7 @@ func (s *service) Mount(_ context.Context, rq *rpc.MountRequest) (*rpc.MountIden
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
-	fi, err := fs.NewFTPClient(ctx, ap, rq.Directory, rq.ReadTimeout.AsDuration())
+	fi, err := fs.NewFTPClient(ctx, ap, rq.Directory, rq.ReadOnly, rq.ReadTimeout.AsDuration())
 	if err != nil {
 		cancel()
 		return nil, status.Errorf(codes.Internal, err.Error())
